@@ -939,7 +939,7 @@ export default function GitActionsControl({
   );
   const activeEnvironmentId = activeThreadRef?.environmentId ?? null;
   const successScopeKey = `${activeEnvironmentId ?? ""}\u0000${gitCwd ?? ""}`;
-  const canWriteSourceControl = useEnvironmentScope(
+  const hasSourceControlWritePermission = useEnvironmentScope(
     activeEnvironmentId,
     AuthSourceControlWriteScope,
   );
@@ -964,7 +964,6 @@ export default function GitActionsControl({
   const activeServerThread =
     activeServerThreadShell ?? activeServerThreadProjection?.projection.thread ?? null;
   const isLocalDraftThread = activeDraftThread !== null && activeServerThread === null;
-  const canChangeThreadBranch = canWriteSourceControl && (isLocalDraftThread || canOperateThread);
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
   const [isCommitDialogOpen, setIsCommitDialogOpen] = useState(false);
   const [dialogCommitMessage, setDialogCommitMessage] = useState("");
@@ -1042,6 +1041,9 @@ export default function GitActionsControl({
     reportFailure: false,
   });
   const { data: gitStatus, error: gitStatusError } = gitStatusQuery;
+  const canWriteSourceControl =
+    hasSourceControlWritePermission && gitStatus?.supportsMutations !== false;
+  const canChangeThreadBranch = canWriteSourceControl && (isLocalDraftThread || canOperateThread);
   const sourceControlPresentation = getSourceControlPresentation(gitStatus?.sourceControlProvider);
   const changeRequestTerminology = sourceControlPresentation.terminology;
   const SourceControlIcon = sourceControlPresentation.Icon;
@@ -1480,7 +1482,7 @@ export default function GitActionsControl({
 
   return (
     <>
-      {!showActions ? null : !isRepo ? (
+      {!showActions || gitStatus?.supportsMutations === false ? null : !isRepo ? (
         <ThreadDetailsControl
           size="xs"
           variant="ghost"

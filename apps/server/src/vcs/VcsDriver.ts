@@ -10,6 +10,23 @@ import type {
 } from "@t3tools/contracts";
 import { CheckpointRef } from "@t3tools/contracts";
 import * as VcsProcess from "./VcsProcess.ts";
+import type { ReviewDiffPreviewInput, ReviewDiffPreviewResult } from "@t3tools/contracts";
+import type { ReviewDiffFileContentsInput } from "@t3tools/contracts";
+import type { ReviewDiffFileContentsResult } from "@t3tools/contracts";
+import type { VcsStatusInput, VcsStatusLocalResult } from "@t3tools/contracts";
+import type { VcsListRefsInput, VcsListRefsResult } from "@t3tools/contracts";
+
+export interface VcsWorkingTreeOps {
+  readonly localStatus: (input: VcsStatusInput) => Effect.Effect<VcsStatusLocalResult, VcsError>;
+  readonly currentBranch: (cwd: string) => Effect.Effect<string | null, VcsError>;
+  readonly listRefs: (input: VcsListRefsInput) => Effect.Effect<VcsListRefsResult, VcsError>;
+  readonly getDiffPreview: (
+    input: ReviewDiffPreviewInput,
+  ) => Effect.Effect<ReviewDiffPreviewResult, VcsError>;
+  readonly getDiffFileContents: (
+    input: ReviewDiffFileContentsInput,
+  ) => Effect.Effect<ReviewDiffFileContentsResult, VcsError>;
+}
 
 export interface VcsCaptureCheckpointInput {
   readonly cwd: string;
@@ -72,6 +89,7 @@ export class VcsDriver extends Context.Service<
       input: Omit<VcsProcess.VcsProcessInput, "command">,
     ) => Effect.Effect<VcsProcess.VcsProcessOutput, VcsError>;
     readonly checkpoints: VcsCheckpointOps;
+    readonly workingTree?: VcsWorkingTreeOps;
     readonly detectRepository: (
       cwd: string,
     ) => Effect.Effect<VcsRepositoryIdentity | null, VcsError>;

@@ -40,6 +40,14 @@ interface DiscoveryProbeResult<Kind extends string> {
 
 const VCS_PROBES: ReadonlyArray<VcsProbe> = [
   {
+    kind: "arc",
+    label: "Arc",
+    executable: "arc",
+    versionArgs: ["--version"],
+    implemented: true,
+    installHint: "Install the Arc CLI and make it available on this environment’s PATH.",
+  },
+  {
     kind: "git",
     label: "Git",
     executable: "git",

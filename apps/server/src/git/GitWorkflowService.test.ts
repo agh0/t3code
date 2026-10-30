@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import { ChildProcessSpawner } from "effect/process";
 import * as Layer from "effect/Layer";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -56,3 +57,55 @@ it.layer(NodeServices.layer)("GitWorkflowService", (it) => {
     ),
   );
 });
+
+it.effect("routes Arc reads without Git and refuses Git mutations in an Arc working copy", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-arc-workflow-" });
+    yield* fs.makeDirectory(`${cwd}/.arc`);
+    const process = VcsProcess.VcsProcess.of({
+      run: (input) => {
+        assert.equal(input.command, "arc");
+        const stdout =
+          input.args[0] === "status"
+            ? '{"branch_info":{"local":{"name":"users/test/topic"}},"status":{}}'
+            : input.args[0] === "info"
+              ? '{"branch":"users/test/topic"}'
+              : "";
+        return Effect.succeed({
+          exitCode: ChildProcessSpawner.ExitCode(0),
+          stdout,
+          stderr: "",
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        });
+      },
+    });
+    yield* Effect.gen(function* () {
+      const workflow = yield* GitWorkflowService.GitWorkflowService;
+      assert.equal((yield* workflow.status({ cwd })).supportsMutations, false);
+      assert.equal(yield* workflow.currentBranch(cwd), "users/test/topic");
+      assert.equal((yield* workflow.listRefs({ cwd })).refs[0]?.name, "users/test/topic");
+      assert.equal(yield* workflow.remoteStatus({ cwd }), null);
+      for (const action of [
+        workflow.pullCurrentBranch(cwd).pipe(Effect.asVoid),
+        workflow.createRef({ cwd, refName: "new" }).pipe(Effect.asVoid),
+        workflow.switchRef({ cwd, refName: "trunk" }).pipe(Effect.asVoid),
+        workflow.createWorktree({ cwd, refName: "trunk", path: null }).pipe(Effect.asVoid),
+      ]) {
+        const error = yield* action.pipe(Effect.flip);
+        assert.equal(error._tag, "GitCommandError");
+        assert.match(error.detail ?? "", /requires Git/);
+      }
+    }).pipe(
+      Effect.provide(
+        GitWorkflowService.layer.pipe(
+          Layer.provide(Layer.mock(GitManager.GitManager)({})),
+          Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+          Layer.provide(VcsDriverRegistry.layer),
+          Layer.provide(Layer.succeed(VcsProcess.VcsProcess, process)),
+        ),
+      ),
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);

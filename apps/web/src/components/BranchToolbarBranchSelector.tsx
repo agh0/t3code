@@ -113,7 +113,10 @@ export function BranchToolbarBranchSelector({
   onComposerFocusRequest,
 }: BranchToolbarBranchSelectorProps) {
   const composerFloatingLayerProps = useComposerMenuProps();
-  const canWriteSourceControl = useEnvironmentScope(environmentId, AuthSourceControlWriteScope);
+  const hasSourceControlWritePermission = useEnvironmentScope(
+    environmentId,
+    AuthSourceControlWriteScope,
+  );
   const canOperateThread = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
   const stopThreadSession = useAtomCommand(threadEnvironment.stopSession, "thread session stop");
   const updateThreadMetadata = useAtomCommand(
@@ -159,7 +162,6 @@ export function BranchToolbarBranchSelector({
   const branchCwd = activeWorktreePath ?? activeProjectCwd;
   const hasServerThread = serverThread !== null;
   const canUpdateThreadBranch = !hasServerThread || canOperateThread;
-  const canChangeThreadBranch = canWriteSourceControl && canUpdateThreadBranch;
   const effectiveEnvMode =
     effectiveEnvModeOverride ??
     resolveEffectiveEnvMode({
@@ -233,6 +235,11 @@ export function BranchToolbarBranchSelector({
     // spaces.
     query: sanitizeNewRefName(deferredBranchQuery.trim()),
   });
+  const canWriteSourceControl =
+    hasSourceControlWritePermission &&
+    branchStatusQuery.data?.supportsMutations !== false &&
+    branchRefState.data?.supportsMutations !== false;
+  const canChangeThreadBranch = canWriteSourceControl && canUpdateThreadBranch;
   const trimmedBranchQuery = branchQuery.trim();
   const deferredTrimmedBranchQuery = deferredBranchQuery.trim();
   const refs = branchRefState.refs;

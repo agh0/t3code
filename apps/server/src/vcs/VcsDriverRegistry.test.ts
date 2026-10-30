@@ -102,6 +102,11 @@ describe("VcsDriverRegistry", () => {
           (yield* registry.detect({ cwd: projectDir }))?.repository.rootPath,
           projectDir,
         );
+        yield* fs.remove(path.join(projectDir, ".git"), { recursive: true });
+        yield* fs.makeDirectory(path.join(projectDir, ".arc"));
+        assert.equal((yield* registry.detect({ cwd: projectDir }))?.kind, "arc");
+        yield* fs.remove(path.join(projectDir, ".arc"), { recursive: true });
+        assert.equal((yield* registry.detect({ cwd: projectDir }))?.repository.rootPath, parentDir);
       }).pipe(Effect.provide(makeDiskBackedLayer(parentDir, calls)));
     }).pipe(Effect.provide(NodeServices.layer)),
   );
