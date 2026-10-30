@@ -12,6 +12,7 @@ import * as GitManager from "./GitManager.ts";
 import * as GitWorkflowService from "./GitWorkflowService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
+import * as VcsProvisioningService from "../vcs/VcsProvisioningService.ts";
 
 it.layer(NodeServices.layer)("GitWorkflowService", (it) => {
   it.effect("finds a name among the refs of every namespace", () =>
@@ -97,9 +98,12 @@ it.effect("routes Arc reads without Git and refuses Git mutations in an Arc work
         assert.equal(error._tag, "GitCommandError");
         assert.match(error.detail ?? "", /requires Git/);
       }
+      const provisioning = yield* VcsProvisioningService.VcsProvisioningService;
+      const initError = yield* provisioning.initRepository({ cwd }).pipe(Effect.flip);
+      assert.equal(initError._tag, "VcsUnsupportedOperationError");
     }).pipe(
       Effect.provide(
-        GitWorkflowService.layer.pipe(
+        Layer.mergeAll(GitWorkflowService.layer, VcsProvisioningService.layer).pipe(
           Layer.provide(Layer.mock(GitManager.GitManager)({})),
           Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
           Layer.provide(VcsDriverRegistry.layer),

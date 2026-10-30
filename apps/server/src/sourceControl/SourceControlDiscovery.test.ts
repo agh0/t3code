@@ -123,9 +123,9 @@ it.effect("reports every hosting integration in registry order with its sign-in"
     assert.deepStrictEqual(
       result.versionControlSystems.map((item) => [item.kind, item.status]),
       [
-        ["arc", "available"],
         ["git", "available"],
         ["jj", "available"],
+        ["arc", "available"],
       ],
     );
   }).pipe(Effect.provide(SourceControlDiscovery.layer.pipe(Layer.provide(layerDiscovery)))),

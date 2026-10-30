@@ -40,7 +40,7 @@ const fixture = Effect.fn("test.arcFixture")(function* () {
   const responses = {
     diff: output(patch),
     status: output(""),
-    files: output("tracked.txt\nnew file.txt\n../outside\n.arc/config\n"),
+    files: output("tracked.txt\n../outside\n.arc/config\n"),
   };
   const calls: VcsProcess.VcsProcessInput[] = [];
   const process = VcsProcess.VcsProcess.of({
@@ -100,6 +100,9 @@ describe("ArcVcsDriver", () => {
       );
       const files = yield* driver.listWorkspaceFiles(cwd);
       assert.deepEqual(files.paths, ["tracked.txt", "new file.txt"]);
+      assert.ok(
+        calls.every((call) => call.args[0] !== "ls-files" || !call.args.includes("--others")),
+      );
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -135,9 +138,18 @@ describe("ArcVcsDriver", () => {
     "rejects paths outside the project, including symlinks, and unsupported review sources",
     () =>
       Effect.gen(function* () {
-        const { driver, root, cwd, fs, path } = yield* fixture();
+        const { driver, root, cwd, fs, path, status } = yield* fixture();
         yield* fs.writeFileString(path.join(root, "secret"), "secret\n");
         yield* fs.symlink(path.join(root, "secret"), path.join(cwd, "link"));
+        yield* fs.symlink(path.join(root, "missing"), path.join(cwd, "broken"));
+        status.status.untracked.push(
+          { path: "browser/client/link", status: "untracked", type: "file" },
+          { path: "browser/client/broken", status: "untracked", type: "file" },
+        );
+        const local = yield* driver.workingTree.localStatus({ cwd });
+        assert.ok(local.workingTree.files.some((file) => file.path === "link"));
+        assert.ok(local.workingTree.files.some((file) => file.path === "broken"));
+        assert.ok(local.workingTree.files.some((file) => file.path === "new file.txt"));
         for (const filePath of ["../secret", "/etc/passwd", "link"]) {
           const error = yield* driver.workingTree
             .getDiffFileContents({
@@ -181,13 +193,14 @@ describe("ArcVcsDriver", () => {
           (yield* driver.workingTree.localStatus({ cwd }).pipe(Effect.flip))._tag,
           "VcsRepositoryDetectionError",
         );
+        responses.status = { ...responses.status, stdoutTruncated: false };
         responses.files = {
           ...responses.files,
           stdout: "complete.txt\npartial",
           stdoutTruncated: true,
         };
         const files = yield* driver.listWorkspaceFiles(cwd);
-        assert.deepEqual(files.paths, ["complete.txt"]);
+        assert.deepEqual(files.paths, ["complete.txt", "new file.txt"]);
         assert.equal(files.truncated, true);
       }).pipe(Effect.provide(NodeServices.layer)),
   );

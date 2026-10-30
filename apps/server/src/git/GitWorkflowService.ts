@@ -1,6 +1,9 @@
+import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
 import { mergeGitStatusParts } from "@t3tools/shared/git";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as FileSystem from "effect/FileSystem";
 
@@ -28,12 +31,16 @@ import {
   type VcsStatusLocalResult,
   type VcsStatusRemoteResult,
   type VcsStatusResult,
+  type VcsError,
 } from "@t3tools/contracts";
 
 import * as GitManager from "./GitManager.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+
+const WORKING_TREE_STATUS_CACHE_TTL = Duration.seconds(1);
+const WORKING_TREE_STATUS_CACHE_CAPACITY = 256;
 
 export class GitWorkflowService extends Context.Service<
   GitWorkflowService,
@@ -184,6 +191,51 @@ export const make = Effect.gen(function* () {
       Effect.flatMap((cwd) => withWorkspaceLease(cwd, effect)),
     );
 
+  const requireGitHandle = (
+    operation: string,
+    cwd: string,
+    handle: VcsDriverRegistry.VcsDriverHandle,
+  ) =>
+    handle.kind === "git"
+      ? Effect.succeed(handle)
+      : Effect.fail(
+          new GitCommandError({
+            operation,
+            command: "vcs-route",
+            cwd,
+            detail: "This operation requires Git. Use your VCS CLI to change this working copy.",
+          }),
+        );
+
+  const workingTreeFailure =
+    (operation: string, cwd: string, detail: string) => (cause: VcsError) =>
+      new GitManagerError({ operation, cwd, detail, cause });
+
+  // Matches GitManager's status cache: concurrent readers share one Arc status + diff run.
+  const workingTreeStatusCache = yield* Cache.makeWith(
+    (cwd: string) =>
+      registry.detect({ cwd }).pipe(
+        Effect.flatMap((handle) =>
+          handle?.driver.workingTree
+            ? handle.driver.workingTree.localStatus({ cwd })
+            : Effect.succeed(nonRepositoryLocalStatus()),
+        ),
+        Effect.mapError(
+          workingTreeFailure(
+            "GitWorkflowService.localStatus",
+            cwd,
+            "Failed to read working copy status.",
+          ),
+        ),
+      ),
+    {
+      capacity: WORKING_TREE_STATUS_CACHE_CAPACITY,
+      timeToLive: (exit) => (Exit.isSuccess(exit) ? WORKING_TREE_STATUS_CACHE_TTL : Duration.zero),
+    },
+  );
+  const invalidateWorkingTreeStatus = (cwd: string) =>
+    Cache.invalidate(workingTreeStatusCache, cwd);
+
   const ensureGit = Effect.fn("GitWorkflowService.ensureGit")(function* (
     operation: string,
     cwd: string,
@@ -199,14 +251,7 @@ export const make = Effect.gen(function* () {
           }),
       ),
     );
-    if (handle.kind !== "git")
-      return yield* new GitCommandError({
-        operation,
-        command: "vcs-route",
-        cwd,
-        detail: "This operation requires Git. Use your VCS CLI to change this working copy.",
-      });
-    return handle;
+    return yield* requireGitHandle(operation, cwd, handle);
   });
 
   const ensureGitCommand = Effect.fn("GitWorkflowService.ensureGitCommand")(function* (
@@ -225,14 +270,7 @@ export const make = Effect.gen(function* () {
           }),
       ),
     );
-    if (handle.kind !== "git")
-      return yield* new GitCommandError({
-        operation,
-        command: "vcs-route",
-        cwd,
-        detail: "This operation requires Git. Use your VCS CLI to change this working copy.",
-      });
-    return handle;
+    return yield* requireGitHandle(operation, cwd, handle);
   });
 
   const detectGitRepositoryForStatus = Effect.fn("GitWorkflowService.detectGitRepositoryForStatus")(
@@ -332,17 +370,8 @@ export const make = Effect.gen(function* () {
           !handle
             ? Effect.succeed(nonRepositoryStatus())
             : handle.driver.workingTree
-              ? handle.driver.workingTree.localStatus(input).pipe(
+              ? Cache.get(workingTreeStatusCache, input.cwd).pipe(
                   Effect.map((local) => mergeGitStatusParts(local, null)),
-                  Effect.mapError(
-                    (cause) =>
-                      new GitManagerError({
-                        operation: "GitWorkflowService.status",
-                        cwd: input.cwd,
-                        detail: "Failed to read working copy status.",
-                        cause,
-                      }),
-                  ),
                 )
               : gitManager.status(input),
         ),
@@ -354,17 +383,7 @@ export const make = Effect.gen(function* () {
           !handle
             ? Effect.succeed(nonRepositoryLocalStatus())
             : handle.driver.workingTree
-              ? handle.driver.workingTree.localStatus(input).pipe(
-                  Effect.mapError(
-                    (cause) =>
-                      new GitManagerError({
-                        operation: "GitWorkflowService.localStatus",
-                        cwd: input.cwd,
-                        detail: "Failed to read working copy status.",
-                        cause,
-                      }),
-                  ),
-                )
+              ? Cache.get(workingTreeStatusCache, input.cwd)
               : gitManager.localStatus(input),
         ),
       );
@@ -373,17 +392,17 @@ export const make = Effect.gen(function* () {
       const handle = yield* detectGitRepositoryForStatus("GitWorkflowService.currentBranch", cwd);
       if (!handle) return null;
       if (handle.driver.workingTree)
-        return yield* handle.driver.workingTree.currentBranch(cwd).pipe(
-          Effect.mapError(
-            (cause) =>
-              new GitManagerError({
-                operation: "GitWorkflowService.currentBranch",
+        return yield* handle.driver.workingTree
+          .currentBranch(cwd)
+          .pipe(
+            Effect.mapError(
+              workingTreeFailure(
+                "GitWorkflowService.currentBranch",
                 cwd,
-                detail: "Failed to read current branch.",
-                cause,
-              }),
-          ),
-        );
+                "Failed to read current branch.",
+              ),
+            ),
+          );
       const result = yield* git.execute({
         operation: "GitWorkflowService.currentBranch",
         cwd,
@@ -413,9 +432,15 @@ export const make = Effect.gen(function* () {
         ),
       );
     }),
-    invalidateLocalStatus: gitManager.invalidateLocalStatus,
+    invalidateLocalStatus: Effect.fn("GitWorkflowService.invalidateLocalStatus")(function* (cwd) {
+      yield* invalidateWorkingTreeStatus(cwd);
+      yield* gitManager.invalidateLocalStatus(cwd);
+    }),
     invalidateRemoteStatus: gitManager.invalidateRemoteStatus,
-    invalidateStatus: gitManager.invalidateStatus,
+    invalidateStatus: Effect.fn("GitWorkflowService.invalidateStatus")(function* (cwd) {
+      yield* invalidateWorkingTreeStatus(cwd);
+      yield* gitManager.invalidateStatus(cwd);
+    }),
     pullCurrentBranch: Effect.fn("GitWorkflowService.pullCurrentBranch")(function (cwd) {
       return ensureGitCommand("GitWorkflowService.pullCurrentBranch", cwd).pipe(
         Effect.andThen(git.pullCurrentBranch(cwd)),
