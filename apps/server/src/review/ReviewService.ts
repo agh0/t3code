@@ -100,6 +100,7 @@ export const make = Effect.gen(function* () {
 
     const handle = yield* vcsRegistry.detect({ cwd: input.cwd, requestedKind: "auto" });
     if (!handle) return { commits: [], truncated: false };
+    if (handle.kind === "arc") return { commits: [], truncated: false };
     if (handle.kind !== "git") {
       return yield* new VcsUnsupportedOperationError({
         operation: "ReviewService.getBranchCommits",
@@ -124,6 +125,7 @@ export const make = Effect.gen(function* () {
       };
     }
 
+    if (handle.driver.workingTree) return yield* handle.driver.workingTree.getDiffPreview(input);
     return yield* git.getReviewDiffPreview(input);
   });
 
@@ -133,6 +135,8 @@ export const make = Effect.gen(function* () {
     yield* assertWorkspaceBoundCwd("ReviewService.getDiffFileContents", input.cwd);
 
     const handle = yield* vcsRegistry.detect({ cwd: input.cwd, requestedKind: "auto" });
+    if (handle?.driver.workingTree)
+      return yield* handle.driver.workingTree.getDiffFileContents(input);
     if (handle?.kind !== "git") {
       return yield* new VcsUnsupportedOperationError({
         operation: "ReviewService.getDiffFileContents",

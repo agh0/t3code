@@ -1,4 +1,5 @@
 import * as Context from "effect/Context";
+import { mergeGitStatusParts } from "@t3tools/shared/git";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as FileSystem from "effect/FileSystem";
@@ -210,6 +211,13 @@ export const make = Effect.gen(function* () {
           }),
       ),
     );
+    if (handle.kind !== "git")
+      return yield* new GitCommandError({
+        operation,
+        command: "vcs-route",
+        cwd,
+        detail: "This operation requires Git. Use your VCS CLI to change this working copy.",
+      });
     return handle;
   });
 
@@ -229,6 +237,13 @@ export const make = Effect.gen(function* () {
           }),
       ),
     );
+    if (handle.kind !== "git")
+      return yield* new GitCommandError({
+        operation,
+        command: "vcs-route",
+        cwd,
+        detail: "This operation requires Git. Use your VCS CLI to change this working copy.",
+      });
     return handle;
   });
 
@@ -245,10 +260,7 @@ export const make = Effect.gen(function* () {
             }),
         ),
       );
-      if (!handle) {
-        return false;
-      }
-      return true;
+      return handle;
     },
   );
 
@@ -267,10 +279,7 @@ export const make = Effect.gen(function* () {
           }),
       ),
     );
-    if (!handle) {
-      return false;
-    }
-    return true;
+    return handle;
   });
 
   const routeGitManager =
@@ -284,7 +293,7 @@ export const make = Effect.gen(function* () {
   return GitWorkflowService.of({
     repositoryRoot: Effect.fn("GitWorkflowService.repositoryRoot")(function (cwd) {
       return registry.detect({ cwd }).pipe(
-        Effect.map((handle) => (handle?.kind === "git" ? handle.repository.rootPath : null)),
+        Effect.map((handle) => handle?.repository.rootPath ?? null),
         Effect.mapError(
           (cause) =>
             new GitManagerError({
@@ -331,24 +340,62 @@ export const make = Effect.gen(function* () {
     }),
     status: Effect.fn("GitWorkflowService.status")(function (input) {
       return detectGitRepositoryForStatus("GitWorkflowService.status", input.cwd).pipe(
-        Effect.flatMap((isGitRepository) =>
-          isGitRepository ? gitManager.status(input) : Effect.succeed(nonRepositoryStatus()),
+        Effect.flatMap((handle) =>
+          !handle
+            ? Effect.succeed(nonRepositoryStatus())
+            : handle.driver.workingTree
+              ? handle.driver.workingTree.localStatus(input).pipe(
+                  Effect.map((local) => mergeGitStatusParts(local, null)),
+                  Effect.mapError(
+                    (cause) =>
+                      new GitManagerError({
+                        operation: "GitWorkflowService.status",
+                        cwd: input.cwd,
+                        detail: "Failed to read working copy status.",
+                        cause,
+                      }),
+                  ),
+                )
+              : gitManager.status(input),
         ),
       );
     }),
     localStatus: Effect.fn("GitWorkflowService.localStatus")(function (input) {
       return detectGitRepositoryForStatus("GitWorkflowService.localStatus", input.cwd).pipe(
-        Effect.flatMap((isGitRepository) =>
-          isGitRepository
-            ? gitManager.localStatus(input)
-            : Effect.succeed(nonRepositoryLocalStatus()),
+        Effect.flatMap((handle) =>
+          !handle
+            ? Effect.succeed(nonRepositoryLocalStatus())
+            : handle.driver.workingTree
+              ? handle.driver.workingTree.localStatus(input).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new GitManagerError({
+                        operation: "GitWorkflowService.localStatus",
+                        cwd: input.cwd,
+                        detail: "Failed to read working copy status.",
+                        cause,
+                      }),
+                  ),
+                )
+              : gitManager.localStatus(input),
         ),
       );
     }),
     currentBranch: Effect.fn("GitWorkflowService.currentBranch")(function* (cwd) {
-      if (!(yield* detectGitRepositoryForStatus("GitWorkflowService.currentBranch", cwd))) {
-        return null;
-      }
+      const handle = yield* detectGitRepositoryForStatus("GitWorkflowService.currentBranch", cwd);
+      if (!handle) return null;
+      if (handle.driver.workingTree)
+        return yield* handle.driver.workingTree.currentBranch(cwd).pipe(
+          Effect.mapError(
+            (cause) =>
+              new GitManagerError({
+                operation: "GitWorkflowService.currentBranch",
+                cwd,
+                detail: "Failed to read current branch.",
+                cause,
+              }),
+          ),
+        );
       const result = yield* git.execute({
         operation: "GitWorkflowService.currentBranch",
         cwd,
@@ -383,8 +430,8 @@ export const make = Effect.gen(function* () {
     }),
     remoteStatus: Effect.fn("GitWorkflowService.remoteStatus")(function (input, options) {
       return detectGitRepositoryForStatus("GitWorkflowService.remoteStatus", input.cwd).pipe(
-        Effect.flatMap((isGitRepository) =>
-          isGitRepository ? gitManager.remoteStatus(input, options) : Effect.succeed(null),
+        Effect.flatMap((handle) =>
+          handle?.kind === "git" ? gitManager.remoteStatus(input, options) : Effect.succeed(null),
         ),
       );
     }),
@@ -439,8 +486,23 @@ export const make = Effect.gen(function* () {
     ),
     listRefs: Effect.fn("GitWorkflowService.listRefs")(function (input) {
       return detectGitRepositoryForCommand("GitWorkflowService.listRefs", input.cwd).pipe(
-        Effect.flatMap((isGitRepository) =>
-          isGitRepository ? git.listRefs(input) : Effect.succeed(nonRepositoryListRefs()),
+        Effect.flatMap((handle) =>
+          !handle
+            ? Effect.succeed(nonRepositoryListRefs())
+            : handle.driver.workingTree
+              ? handle.driver.workingTree.listRefs(input).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new GitCommandError({
+                        operation: "GitWorkflowService.listRefs",
+                        command: "vcs-route",
+                        cwd: input.cwd,
+                        detail: "Failed to read working copy refs.",
+                        cause,
+                      }),
+                  ),
+                )
+              : git.listRefs(input),
         ),
       );
     }),
