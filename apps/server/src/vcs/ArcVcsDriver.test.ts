@@ -80,6 +80,7 @@ describe("ArcVcsDriver", () => {
       const { driver, root, cwd, calls } = yield* fixture();
       assert.equal((yield* driver.detectRepository(cwd))?.rootPath, root);
       const status = yield* driver.workingTree.localStatus({ cwd });
+      assert.equal(calls.find((call) => call.args[0] === "status")?.timeoutMs, 120_000);
       assert.equal(status.refName, "users/test/topic");
       assert.equal(status.supportsMutations, false);
       assert.equal(status.workingTree.rootPath, cwd);

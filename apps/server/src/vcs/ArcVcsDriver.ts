@@ -34,7 +34,7 @@ export const make = Effect.gen(function* () {
   const process = yield* VcsProcess.VcsProcess;
   const crypto = yield* Crypto.Crypto;
   const execute: VcsDriver.VcsDriver["Service"]["execute"] = (input) =>
-    process.run({ ...input, command: "arc" });
+    process.run({ timeoutMs: 120_000, ...input, command: "arc" });
   const invalid = (cwd: string, operation: string, detail: string, cause?: unknown) =>
     new VcsRepositoryDetectionError({
       cwd,
