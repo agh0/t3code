@@ -2,19 +2,22 @@ import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 
 import type {
+  ReviewDiffFileContentsInput,
+  ReviewDiffFileContentsResult,
+  ReviewDiffPreviewInput,
+  ReviewDiffPreviewResult,
   VcsError,
   VcsInitInput,
+  VcsListRefsInput,
+  VcsListRefsResult,
   VcsListRemotesResult,
   VcsListWorkspaceFilesResult,
   VcsRepositoryIdentity,
+  VcsStatusInput,
+  VcsStatusLocalResult,
 } from "@t3tools/contracts";
 import { CheckpointRef } from "@t3tools/contracts";
 import * as VcsProcess from "./VcsProcess.ts";
-import type { ReviewDiffPreviewInput, ReviewDiffPreviewResult } from "@t3tools/contracts";
-import type { ReviewDiffFileContentsInput } from "@t3tools/contracts";
-import type { ReviewDiffFileContentsResult } from "@t3tools/contracts";
-import type { VcsStatusInput, VcsStatusLocalResult } from "@t3tools/contracts";
-import type { VcsListRefsInput, VcsListRefsResult } from "@t3tools/contracts";
 
 export interface VcsWorkingTreeOps {
   readonly localStatus: (input: VcsStatusInput) => Effect.Effect<VcsStatusLocalResult, VcsError>;

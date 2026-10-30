@@ -43,6 +43,12 @@ export const make = Effect.gen(function* () {
     "VcsProvisioningService.initRepository",
   )(function* (input) {
     const kind = yield* resolveRequestedKind(input.kind);
+    if ((yield* registry.detect({ cwd: input.cwd }))?.kind === "arc")
+      return yield* new VcsUnsupportedOperationError({
+        operation: "VcsProvisioningService.initRepository",
+        kind: "arc",
+        detail: "This folder is already inside an Arc working copy.",
+      });
     const driver = yield* registry.get(kind);
     return yield* driver.initRepository(input);
   });

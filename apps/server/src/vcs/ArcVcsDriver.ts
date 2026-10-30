@@ -243,7 +243,9 @@ export const make = Effect.gen(function* () {
         truncated = true;
         break;
       }
-      const content = yield* readFile(cwd, entry.path);
+      // Broken or escaping symlinks and unreadable files must not fail the whole status.
+      const content = yield* readFile(cwd, entry.path).pipe(Effect.orElseSucceed(() => null));
+      if (content === null) continue;
       if (content.kind === "too-large") {
         truncated = true;
         continue;
@@ -345,7 +347,7 @@ export const make = Effect.gen(function* () {
         isRepo: true,
         supportsMutations: false,
         hasPrimaryRemote: false,
-        refs: refs.slice(input.cursor ?? 0, (input.cursor ?? 0) + (input.limit ?? 100)),
+        refs,
         totalCount: refs.length,
         nextCursor: null,
       };
@@ -435,16 +437,21 @@ export const make = Effect.gen(function* () {
   const listWorkspaceFiles: VcsDriver.VcsDriver["Service"]["listWorkspaceFiles"] = Effect.fn(
     "ArcVcsDriver.listWorkspaceFiles",
   )(function* (cwd) {
-    const result = yield* execute({
-      operation: "ArcVcsDriver.listWorkspaceFiles",
-      cwd,
-      args: ["ls-files", "--cached", "--others", "."],
-      maxOutputBytes: MAX_METADATA_BYTES,
-    });
+    // `ls-files --others` includes ignored files such as node_modules, so untracked paths come from status.
+    const [result, changed] = yield* Effect.all([
+      execute({
+        operation: "ArcVcsDriver.listWorkspaceFiles",
+        cwd,
+        args: ["ls-files", "--cached", "."],
+        maxOutputBytes: MAX_METADATA_BYTES,
+      }),
+      changedFiles(cwd),
+    ]);
     const lines = result.stdout.split("\n");
     if (result.stdoutTruncated) lines.pop();
+    const untracked = changed.entries.filter((entry) => entry.untracked).map((entry) => entry.path);
     return {
-      paths: [...new Set(lines.filter(safeRelative))],
+      paths: [...new Set([...lines, ...untracked].filter(safeRelative))],
       truncated: result.stdoutTruncated,
       freshness: yield* freshness(),
     };
