@@ -306,10 +306,14 @@ export default function DiffPanel({
   }, [diffSelection, orderedTurnDiffSummaries, routeThreadRef]);
 
   const selectedRunId = diffSelection.kind === "turn" ? diffSelection.turnId : null;
+  // Read-only working copies (Arc) only report uncommitted changes, not a branch range.
+  const workingTreeOnly = gitStatusQuery.data?.supportsMutations === false;
   const selectedGitScope =
     diffSelection.kind === "unstaged" || diffSelection.kind === "commit"
       ? diffSelection.kind
-      : "branch";
+      : workingTreeOnly
+        ? "unstaged"
+        : "branch";
   const selectedCommitSha = diffSelection.kind === "commit" ? diffSelection.sha : null;
   const selectedBaseRef =
     diffSelection.kind === "branch" || diffSelection.kind === "commit"
@@ -820,9 +824,11 @@ export default function DiffPanel({
           ) : null}
           <DropdownMenuContent align="start">
             <DropdownMenuRadioGroup value={selectedScopeValue} onValueChange={selectScopeValue}>
-              <DropdownMenuRadioItem value="branch" closeOnClick>
-                <span>Changes</span>
-              </DropdownMenuRadioItem>
+              {workingTreeOnly ? null : (
+                <DropdownMenuRadioItem value="branch" closeOnClick>
+                  <span>Changes</span>
+                </DropdownMenuRadioItem>
+              )}
               <DropdownMenuRadioItem value="unstaged" closeOnClick>
                 <span>Uncommitted</span>
               </DropdownMenuRadioItem>

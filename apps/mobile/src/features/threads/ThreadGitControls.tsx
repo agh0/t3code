@@ -121,10 +121,11 @@ function useThreadGitControlModel(props: ThreadGitMenuProps) {
   const navigation = useNavigation();
   const openPullRequest = useOpenPullRequest();
   const environmentId = props.environmentId;
-  const canWriteSourceControl = useEnvironmentScope(
-    environmentId ? EnvironmentId.make(String(environmentId)) : null,
-    AuthSourceControlWriteScope,
-  );
+  const canWriteSourceControl =
+    useEnvironmentScope(
+      environmentId ? EnvironmentId.make(String(environmentId)) : null,
+      AuthSourceControlWriteScope,
+    ) && props.gitStatus?.supportsMutations !== false;
   const threadId = props.threadId;
   const { gitStatus, gitOperationLabel, onPull, onRunAction } = props;
 

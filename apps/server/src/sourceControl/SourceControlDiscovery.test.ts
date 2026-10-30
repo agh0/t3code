@@ -125,6 +125,7 @@ it.effect("reports every hosting integration in registry order with its sign-in"
       [
         ["git", "available"],
         ["jj", "available"],
+        ["arc", "available"],
       ],
     );
   }).pipe(Effect.provide(SourceControlDiscovery.layer.pipe(Layer.provide(layerDiscovery)))),

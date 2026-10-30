@@ -20,6 +20,8 @@ import { flushSync } from "react-dom";
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { useProject, useThreadShellsForProjectRefs } from "../state/entities";
+import { useEnvironmentQuery } from "../state/query";
+import { vcsEnvironment } from "../state/vcs";
 import {
   ADD_TO_MACHINE_LABEL_CLASS,
   type EnvMode,
@@ -631,7 +633,18 @@ export const BranchToolbar = memo(function BranchToolbar({
   const activeProject = useProject(activeProjectRef);
   const activeWorktreePath = forceNewWorktree ? null : worktreePath;
   const effectiveEnvMode = forceNewWorktree ? "worktree" : envMode;
-  const envModeLocked = envLocked || (isServerThread && activeWorktreePath !== null);
+  const vcsStatus = useEnvironmentQuery(
+    activeProject
+      ? vcsEnvironment.status({
+          environmentId,
+          input: { cwd: activeWorktreePath ?? activeProject.workspaceRoot },
+        })
+      : null,
+  );
+  const envModeLocked =
+    envLocked ||
+    vcsStatus.data?.supportsMutations === false ||
+    (isServerThread && activeWorktreePath !== null);
 
   const canUsePreviousWorktree = !isServerThread && !envModeLocked && !forceNewWorktree;
   const projectRefsForWorktreeLookup = canUsePreviousWorktree ? [activeProjectRef] : [];

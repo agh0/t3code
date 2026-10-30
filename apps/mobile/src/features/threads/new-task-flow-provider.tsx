@@ -439,7 +439,11 @@ export function NewTaskFlowProvider(
     environmentId: selectedProject?.environmentId ?? null,
     cwd: selectedProject?.workspaceRoot || null,
   });
-  const knownIsGitRepo = projectGitStatus.data?.isRepo ?? projectBranches.data?.isRepo ?? null;
+  // Read-only working copies (Arc) cannot create worktrees or switch branches, so the flow treats them as plain folders.
+  const repositoryState = projectGitStatus.data ?? projectBranches.data;
+  const knownIsGitRepo = repositoryState
+    ? repositoryState.isRepo && repositoryState.supportsMutations !== false
+    : null;
   const isGitRepo = knownIsGitRepo ?? true;
   const projectSettings = projectDefaults.projectSettings;
   const canChooseWorkspace = !isScratchDraft;

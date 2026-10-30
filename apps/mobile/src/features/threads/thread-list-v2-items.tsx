@@ -403,7 +403,9 @@ export const ThreadListV2PendingRow = memo(function ThreadListV2PendingRow(props
     ? resolvePendingDraftBranch({
         draft: pendingTask.draft,
         defaults: draftDefaults,
-        isGitRepo: draftBranchRefs.data?.isRepo ?? true,
+        isGitRepo:
+          (draftBranchRefs.data?.isRepo ?? true) &&
+          draftBranchRefs.data?.supportsMutations !== false,
         branches: draftBranchRefs.data?.refs ?? [],
         projectCwd,
       })

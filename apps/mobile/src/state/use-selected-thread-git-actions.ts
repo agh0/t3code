@@ -62,7 +62,7 @@ export function useSelectedThreadGitActions() {
   const createWorktree = useAtomCommand(vcsEnvironment.createWorktree, { reportFailure: false });
   const pull = useAtomCommand(vcsEnvironment.pull, { reportFailure: false });
   const { selectedThread, selectedThreadProject } = useThreadSelection();
-  const canWriteSourceControl = useEnvironmentScope(
+  const hasSourceControlWritePermission = useEnvironmentScope(
     selectedThread?.environmentId ?? null,
     AuthSourceControlWriteScope,
   );
@@ -70,7 +70,6 @@ export function useSelectedThreadGitActions() {
     selectedThread?.environmentId ?? null,
     AuthOrchestrationOperateScope,
   );
-  const canChangeThreadBranch = canWriteSourceControl && canOperateThread;
   const { selectedThreadCwd, selectedThreadWorktreePath } = useSelectedThreadWorktree();
   const runStackedAction = useAtomCommand(
     vcsActionManager.runStackedAction({
@@ -87,6 +86,9 @@ export function useSelectedThreadGitActions() {
     query: null,
   };
   const branchState = useBranches(branchTarget);
+  const canWriteSourceControl =
+    hasSourceControlWritePermission && branchState.data?.supportsMutations !== false;
+  const canChangeThreadBranch = canWriteSourceControl && canOperateThread;
   const updateThreadGitContext = async (
     thread: NonNullable<typeof selectedThread>,
     nextState: {
@@ -174,6 +176,7 @@ export function useSelectedThreadGitActions() {
       !selectedThread ||
       !selectedThreadProject ||
       !selectedThreadCwd ||
+      !canWriteSourceControl ||
       !readEnvironmentScope(selectedThread.environmentId, AuthSourceControlWriteScope) ||
       (options?.changesThreadBranch === true &&
         !readEnvironmentScope(selectedThread.environmentId, AuthOrchestrationOperateScope))

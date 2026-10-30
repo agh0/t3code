@@ -326,3 +326,9 @@ the scope and merge strategy. GitHub rebases the remaining stack after merging.
 It can rewrite history and restart checks. If a layer fails, earlier updates remain; resolve that
 layer before retrying. GitHub may require manual conflict resolution after a lower layer is amended,
 even when its changes look independent. Stack actions require an environment that supports them.
+
+## Arc projects
+
+Open an existing Arc working copy, or a project folder inside it. The Arc CLI must be available on the server's PATH. T3 Code detects the repository and shows the current branch, changed files, and uncommitted diffs, including new files. Changes are scoped to the project folder.
+
+Use the terminal for commits, branch changes, push, and Arcanum reviews. Arc checkpoints, turn rollback, and separate working copies are not supported yet.
