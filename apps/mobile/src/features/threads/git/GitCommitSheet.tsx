@@ -31,7 +31,7 @@ export function GitCommitSheet(_props: GitCommitSheetProps) {
   const { selectedThreadCwd } = useSelectedThreadWorktree();
   const gitState = useSelectedThreadGitState();
   const gitActions = useSelectedThreadGitActions();
-  const { canWriteSourceControl, canChangeThreadBranch } = gitActions;
+  const { canWriteSourceControl, canCommitOnFeatureBranch } = gitActions;
 
   const gitStatus = useEnvironmentQuery(
     selectedThread !== null && selectedThreadCwd !== null
@@ -56,7 +56,7 @@ export function GitCommitSheet(_props: GitCommitSheetProps) {
   const selectedDeletions = selectedFiles.reduce((sum, file) => sum + file.deletions, 0);
 
   const runCommitAction = async (featureBranch: boolean) => {
-    if (!canWriteSourceControl || (featureBranch && !canChangeThreadBranch)) return;
+    if (!canWriteSourceControl || (featureBranch && !canCommitOnFeatureBranch)) return;
     const commitMessage = dialogCommitMessage.trim();
     navigation.goBack();
     await gitActions.onRunSelectedThreadGitAction({
@@ -222,7 +222,7 @@ export function GitCommitSheet(_props: GitCommitSheetProps) {
               icon="arrow.branch"
               tone="text"
               fullWidth
-              disabled={!canWriteSourceControl || !canChangeThreadBranch || noneSelected || busy}
+              disabled={!canCommitOnFeatureBranch || noneSelected || busy}
               onPress={() => void runCommitAction(true)}
             />
           </View>

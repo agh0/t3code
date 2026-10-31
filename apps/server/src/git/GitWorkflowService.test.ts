@@ -59,11 +59,12 @@ it.layer(NodeServices.layer)("GitWorkflowService", (it) => {
   );
 });
 
-it.effect("routes Arc reads without Git and refuses Git mutations in an Arc working copy", () =>
+it.effect("routes Arc reads and stacked actions without Git and refuses Git mutations", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-arc-workflow-" });
     yield* fs.makeDirectory(`${cwd}/.arc`);
+    const routedChangeActions: string[] = [];
     const process = VcsProcess.VcsProcess.of({
       run: (input) => {
         assert.equal(input.command, "arc");
@@ -72,7 +73,9 @@ it.effect("routes Arc reads without Git and refuses Git mutations in an Arc work
             ? '{"branch_info":{"local":{"name":"users/test/topic"}},"status":{}}'
             : input.args[0] === "info"
               ? '{"branch":"users/test/topic"}'
-              : "";
+              : input.args[0] === "log"
+                ? "[]"
+                : "";
         return Effect.succeed({
           exitCode: ChildProcessSpawner.ExitCode(0),
           stdout,
@@ -87,7 +90,19 @@ it.effect("routes Arc reads without Git and refuses Git mutations in an Arc work
       assert.equal((yield* workflow.status({ cwd })).supportsMutations, false);
       assert.equal(yield* workflow.currentBranch(cwd), "users/test/topic");
       assert.equal((yield* workflow.listRefs({ cwd })).refs[0]?.name, "users/test/topic");
-      assert.equal(yield* workflow.remoteStatus({ cwd }), null);
+      assert.deepEqual(yield* workflow.remoteStatus({ cwd }), {
+        hasUpstream: false,
+        aheadCount: 0,
+        behindCount: 0,
+        pr: null,
+      });
+      const result = yield* workflow.runStackedAction({
+        actionId: "arc-action",
+        cwd,
+        action: "commit",
+      });
+      assert.equal(result.commit.status, "created");
+      assert.deepEqual(routedChangeActions, ["commit"]);
       for (const action of [
         workflow.pullCurrentBranch(cwd).pipe(Effect.asVoid),
         workflow.createRef({ cwd, refName: "new" }).pipe(Effect.asVoid),
@@ -104,7 +119,23 @@ it.effect("routes Arc reads without Git and refuses Git mutations in an Arc work
     }).pipe(
       Effect.provide(
         Layer.mergeAll(GitWorkflowService.layer, VcsProvisioningService.layer).pipe(
-          Layer.provide(Layer.mock(GitManager.GitManager)({})),
+          Layer.provide(
+            Layer.mock(GitManager.GitManager)({
+              runChangeStackedAction: (input, changes) =>
+                Effect.sync(() => routedChangeActions.push(input.action)).pipe(
+                  Effect.andThen(changes.branchState(input.cwd)),
+                  Effect.as({
+                    action: input.action,
+                    branch: { status: "skipped_not_requested" as const },
+                    commit: { status: "created" as const },
+                    push: { status: "skipped_not_requested" as const },
+                    pr: { status: "skipped_not_requested" as const },
+                    toast: { title: "Committed changes", cta: { kind: "none" as const } },
+                  }),
+                  Effect.orDie,
+                ),
+            }),
+          ),
           Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
           Layer.provide(VcsDriverRegistry.layer),
           Layer.provide(Layer.succeed(VcsProcess.VcsProcess, process)),

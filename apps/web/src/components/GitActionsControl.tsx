@@ -110,6 +110,7 @@ import {
 import { getSourceControlPresentation, sourceControlIcon } from "~/sourceControlPresentation";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { formatDiffCount } from "@t3tools/client-runtime/diff-count";
+import { canRunStackedActions } from "@t3tools/client-runtime/state/vcs";
 import { useOpenLink } from "~/browser/useOpenLink";
 
 interface GitActionsControlProps {
@@ -1041,8 +1042,7 @@ export default function GitActionsControl({
     reportFailure: false,
   });
   const { data: gitStatus, error: gitStatusError } = gitStatusQuery;
-  const canWriteSourceControl =
-    hasSourceControlWritePermission && gitStatus?.supportsMutations !== false;
+  const canWriteSourceControl = hasSourceControlWritePermission && canRunStackedActions(gitStatus);
   const canChangeThreadBranch = canWriteSourceControl && (isLocalDraftThread || canOperateThread);
   const sourceControlPresentation = getSourceControlPresentation(gitStatus?.sourceControlProvider);
   const changeRequestTerminology = sourceControlPresentation.terminology;
@@ -1482,7 +1482,7 @@ export default function GitActionsControl({
 
   return (
     <>
-      {!showActions || gitStatus?.supportsMutations === false ? null : !isRepo ? (
+      {!showActions || !canRunStackedActions(gitStatus) ? null : !isRepo ? (
         <ThreadDetailsControl
           size="xs"
           variant="ghost"

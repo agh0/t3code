@@ -202,6 +202,7 @@ describe("applyGitStatusStreamEvent", () => {
     const current: VcsStatusResult = {
       isRepo: true,
       supportsMutations: false,
+      supportsStackedActions: true,
       sourceControlProvider: {
         kind: SourceControlProviderKind.make("github"),
         name: "GitHub",

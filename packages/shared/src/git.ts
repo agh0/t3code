@@ -327,6 +327,9 @@ function toLocalStatusPart(status: VcsStatusResult): VcsStatusLocalResult {
     ...(status.supportsMutations === undefined
       ? {}
       : { supportsMutations: status.supportsMutations }),
+    ...(status.supportsStackedActions === undefined
+      ? {}
+      : { supportsStackedActions: status.supportsStackedActions }),
     ...(status.sourceControlProvider
       ? { sourceControlProvider: status.sourceControlProvider }
       : {}),
