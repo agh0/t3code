@@ -185,7 +185,7 @@ export function useProactivePanels(input: {
     ) {
       return;
     }
-    useDiffPanelStore.getState().selectGitScope(threadRef, "branch");
+    useDiffPanelStore.getState().selectGitScope(threadRef, "unstaged");
     onDiffPanelOpen?.();
   }, [
     activeLatestRun?.runId,
