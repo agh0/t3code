@@ -20,7 +20,7 @@ export type DiffPanelSelection =
   | { kind: "commit"; sha: string; baseRef: string | null }
   | { kind: "turn"; turnId: RunId; filePath: string | null; revealRequestId: number };
 
-const DEFAULT_SELECTION: DiffPanelSelection = { kind: "branch", baseRef: null };
+const DEFAULT_SELECTION: DiffPanelSelection = { kind: "unstaged" };
 
 interface DiffPanelStoreState {
   byThreadKey: Record<string, DiffPanelSelection>;
