@@ -796,6 +796,7 @@ function fakeArcChanges(scenario: {
         files: [{ path: "a.txt", previousPath: null, additions: 1, deletions: 0 }],
       }),
     safeRelative: () => true,
+    bases: new Map(),
   });
   const mutations = () =>
     calls.filter(

@@ -46,6 +46,7 @@ function fakeArc(info: Record<string, unknown>, respond?: (args: string[]) => st
     execute,
     readDiff: () => Effect.succeed({ diff: "", files: [] }),
     safeRelative: () => true,
+    bases: new Map(),
   });
   return { changes, calls };
 }
@@ -76,6 +77,8 @@ describe("ArcChangeOps", () => {
         calls.find((args) => args[0] === "pr"),
         ["pr", "status", "--json", "users/tester/topic"],
       );
+      // A fresh server learns the shared base from the existing PR.
+      assert.equal((yield* changes.branchState("/repo")).baseRef, "releases/browser/master");
     }),
   );
 
@@ -101,6 +104,36 @@ describe("ArcChangeOps", () => {
         pr: null,
       });
       assert.ok(calls.every((args) => args[0] !== "pr"));
+    }),
+  );
+
+  it.effect("keeps the shared base after a push retargets the branch to users/", () =>
+    Effect.gen(function* () {
+      const info: Record<string, unknown> = {
+        branch: "topic",
+        hash: "h1",
+        remote: "releases/browser/master",
+        user_login: "tester",
+      };
+      const { changes, calls } = fakeArc(info, (args) =>
+        args[0] === "pr"
+          ? "not-found"
+          : args[0] === "log"
+            ? '[{"commit":"c1","message":"Fix"}]'
+            : null,
+      );
+      yield* changes.push("/repo");
+      // Arc now tracks the published branch, as `push --set-upstream` does.
+      info.remote = "users/tester/topic";
+      assert.equal((yield* changes.branchState("/repo")).baseRef, "releases/browser/master");
+
+      const status = yield* changes.remoteStatus("/repo");
+      yield* changes.remoteStatus("/repo");
+      assert.equal(status.aheadOfDefaultCount, 1);
+      assert.deepEqual(
+        calls.filter((args) => args[0] === "log"),
+        [["log", "--json", "-n", "100", "releases/browser/master..HEAD"]],
+      );
     }),
   );
 
@@ -131,26 +164,41 @@ describe("ArcChangeOps", () => {
     }),
   );
 
-  it.effect("never pushes the default branch or a tracked shared branch", () =>
-    Effect.gen(function* () {
-      const trunk = fakeArc({ branch: "trunk", remote: "trunk", user_login: "tester" });
-      const error = yield* trunk.changes.push("/repo").pipe(Effect.flip);
-      assert.equal(error._tag, "VcsUnsupportedOperationError");
-      assert.ok(trunk.calls.every((args) => args[0] !== "push"));
+  it.effect(
+    "never pushes the default branch, a tracked shared branch or a colleague's branch",
+    () =>
+      Effect.gen(function* () {
+        const trunk = fakeArc({ branch: "trunk", remote: "trunk", user_login: "tester" });
+        const error = yield* trunk.changes.push("/repo").pipe(Effect.flip);
+        assert.equal(error._tag, "VcsUnsupportedOperationError");
+        assert.ok(trunk.calls.every((args) => args[0] !== "push"));
 
-      const release = fakeArc({
-        branch: "topic",
-        remote: "releases/browser/master",
-        user_login: "tester",
-      });
-      assert.deepEqual(yield* release.changes.push("/repo"), {
-        upstream: "users/tester/topic",
-        setUpstream: true,
-      });
-      assert.deepEqual(
-        release.calls.find((args) => args[0] === "push"),
-        ["push", "--set-upstream", "users/tester/topic"],
-      );
-    }),
+        const release = fakeArc({
+          branch: "topic",
+          remote: "releases/browser/master",
+          user_login: "tester",
+        });
+        assert.deepEqual(yield* release.changes.push("/repo"), {
+          upstream: "users/tester/topic",
+          setUpstream: true,
+        });
+        assert.deepEqual(
+          release.calls.find((args) => args[0] === "push"),
+          ["push", "--set-upstream", "users/tester/topic"],
+        );
+
+        const colleague = fakeArc({
+          branch: "topic",
+          remote: "users/other/topic",
+          user_login: "tester",
+        });
+        const pushRefused = yield* colleague.changes.push("/repo").pipe(Effect.flip);
+        assert.equal(pushRefused._tag, "VcsUnsupportedOperationError");
+        const prRefused = yield* colleague.changes
+          .createChangeRequest({ cwd: "/repo", title: "Fix", body: "", baseRef: null })
+          .pipe(Effect.flip);
+        assert.equal(prRefused._tag, "VcsUnsupportedOperationError");
+        assert.ok(colleague.calls.every((args) => args[0] !== "push" && args[0] !== "pr"));
+      }),
   );
 });
