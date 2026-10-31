@@ -1,7 +1,9 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import { ChildProcessSpawner } from "effect/process";
@@ -291,7 +293,11 @@ describe("ArcVcsDriver", () => {
       yield* localStatus;
       yield* driver.workingTree.getDiffPreview({ cwd });
       assert.equal(runs("status"), 3);
-      assert.equal(runs("diff"), 3);
+      // The preview's branch range diffs from the merge-base; only the HEAD diff is cached.
+      assert.equal(
+        calls.filter((call) => call.args[0] === "diff" && call.args.includes("HEAD")).length,
+        3,
+      );
       assert.deepEqual(calls.find((call) => call.command === "/usr/bin/xattr")?.args, [
         "-p",
         "user.arc.get.counter",
@@ -347,7 +353,7 @@ describe("ArcVcsDriver", () => {
           calls.some(
             (call) =>
               call.args.join(" ") === `merge-base --json --leftmost arcadia/trunk HEAD` &&
-              call.timeoutMs === 15_000,
+              call.timeoutMs === 120_000,
           ),
         );
         assert.ok(
@@ -497,6 +503,37 @@ describe("ArcVcsDriver", () => {
       yield* driver.workingTree.getBranchCommits({ cwd });
       yield* driver.workingTree.getDiffPreview({ cwd });
       assert.equal(calls.filter((call) => call.args[0] === "merge-base").length, 3);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("compares with the tracked release branch without holding the preview on it", () =>
+    Effect.gen(function* () {
+      const { driver, cwd, calls, responses } = yield* fixture();
+      responses.info = JSON.stringify({ branch: "my-fix", remote: "releases/browser/master" });
+      const started = yield* Deferred.make<void>();
+      const mergeBase = yield* Deferred.make<void>();
+      responses.mergeBase = Deferred.succeed(started, undefined).pipe(
+        Effect.andThen(Deferred.await(mergeBase)),
+        Effect.as(output(JSON.stringify({ base: BASE }))),
+      );
+
+      const pending = yield* driver.workingTree.getDiffPreview({ cwd }).pipe(Effect.forkChild);
+      // The preview starts its wait before the detached merge-base runs.
+      yield* Deferred.await(started);
+      yield* TestClock.adjust(Duration.seconds(2));
+      const first = yield* Fiber.join(pending);
+      assert.deepEqual(
+        first.sources.map((source) => source.kind),
+        ["working-tree"],
+      );
+
+      yield* Deferred.succeed(mergeBase, undefined);
+      const next = yield* driver.workingTree.getDiffPreview({ cwd });
+      assert.equal(next.sources[1]?.baseRef, "arcadia/releases/browser/master");
+      assert.deepEqual(
+        calls.filter((call) => call.args[0] === "merge-base").map((call) => call.args.join(" ")),
+        ["merge-base --json --leftmost arcadia/releases/browser/master HEAD"],
+      );
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

@@ -67,15 +67,17 @@ it.effect("routes Arc reads and stacked actions without Git and refuses Git muta
     const routedChangeActions: string[] = [];
     const process = VcsProcess.VcsProcess.of({
       run: (input) => {
-        assert.equal(input.command, "arc");
+        // The mount counter probe finds no counter, as on nativefs.
         const stdout =
-          input.args[0] === "status"
-            ? '{"branch_info":{"local":{"name":"users/test/topic"}},"status":{}}'
-            : input.args[0] === "info"
-              ? '{"branch":"users/test/topic"}'
-              : input.args[0] === "log"
-                ? "[]"
-                : "";
+          input.command !== "arc"
+            ? ""
+            : input.args[0] === "status"
+              ? '{"branch_info":{"local":{"name":"users/test/topic"}},"status":{}}'
+              : input.args[0] === "info"
+                ? '{"branch":"users/test/topic"}'
+                : input.args[0] === "log"
+                  ? "[]"
+                  : "";
         return Effect.succeed({
           exitCode: ChildProcessSpawner.ExitCode(0),
           stdout,
