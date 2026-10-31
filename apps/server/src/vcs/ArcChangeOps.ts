@@ -17,7 +17,7 @@ const MAX_AHEAD_COUNT = 100;
 const ARCANUM_REVIEW_URL = "https://a.yandex-team.ru/review/";
 // Arc publishes user branches under users/<login>/; other server branches (trunk, releases/...)
 // are shared bases that a local branch may track but must never be pushed to implicitly.
-const USER_BRANCH_PREFIX = "users/";
+export const USER_BRANCH_PREFIX = "users/";
 
 const decodeJson = <S extends Schema.Top>(schema: S) =>
   Schema.decodeEffect(Schema.fromJsonString(schema));

@@ -5,6 +5,7 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Hex from "effect/encoding/Hex";
 import * as Option from "effect/Option";
@@ -32,10 +33,17 @@ const Status = Schema.Struct({
 });
 const decodeStatus = Schema.decodeEffect(Schema.fromJsonString(Status));
 const decodeInfo = Schema.decodeEffect(
-  Schema.fromJsonString(Schema.Struct({ branch: Schema.optional(Schema.String) })),
+  Schema.fromJsonString(
+    Schema.Struct({
+      branch: Schema.optional(Schema.String),
+      remote: Schema.optional(Schema.String),
+    }),
+  ),
 );
 // A release branch against trunk did not finish in minutes; such a branch gets no branch range.
-const MERGE_BASE_TIMEOUT_MS = 15_000;
+const MERGE_BASE_TIMEOUT_MS = 120_000;
+// The diff preview stops waiting for a slow merge-base, which keeps running for the next preview.
+const MERGE_BASE_PREVIEW_WAIT = Duration.seconds(2);
 const MAX_LOG_BYTES = 1024 * 1024;
 const BRANCH_COMMIT_LIMIT = 100;
 const SUBJECT_LIMIT = 300;
@@ -187,25 +195,23 @@ export const make = Effect.gen(function* () {
       ),
     );
   });
-  const currentBranch = Effect.fn("ArcVcsDriver.currentBranch")(function* (cwd: string) {
+  const readInfo = Effect.fn("ArcVcsDriver.readInfo")(function* (cwd: string) {
     const result = yield* execute({
-      operation: "ArcVcsDriver.currentBranch",
+      operation: "ArcVcsDriver.readInfo",
       cwd,
       args: ["info", "--json"],
       maxOutputBytes: 64 * 1024,
     });
     if (result.stdoutTruncated)
-      return yield* invalid(
-        cwd,
-        "currentBranch",
-        "Arc branch metadata exceeds the response limit.",
-      );
-    const info = yield* decodeInfo(result.stdout).pipe(
+      return yield* invalid(cwd, "readInfo", "Arc branch metadata exceeds the response limit.");
+    return yield* decodeInfo(result.stdout).pipe(
       Effect.mapError((cause) =>
-        invalid(cwd, "currentBranch", "Arc returned invalid branch metadata.", cause),
+        invalid(cwd, "readInfo", "Arc returned invalid branch metadata.", cause),
       ),
     );
-    return info.branch || null;
+  });
+  const currentBranch = Effect.fn("ArcVcsDriver.currentBranch")(function* (cwd: string) {
+    return (yield* readInfo(cwd)).branch || null;
   });
   const changedFiles = Effect.fn("ArcVcsDriver.changedFiles")(function* (cwd: string) {
     const root = yield* repositoryRoot(cwd);
@@ -287,57 +293,75 @@ export const make = Effect.gen(function* () {
       return yield* invalid(cwd, "readHead", "Arc returned an invalid HEAD commit.");
     return head;
   });
-  // Neither changes for a working copy: the mount's default branch, and a merge-base per HEAD.
-  const defaultBaseRefs = new Map<string, string>();
-  const mergeBases = new Map<string, string | null>();
-  const defaultBaseRef = Effect.fn("ArcVcsDriver.defaultBaseRef")(function* (
-    cwd: string,
-    root: string,
-  ) {
-    const cached = defaultBaseRefs.get(root);
+  const mounts = new Map<string, { repository: string; defaultBranch: string }>();
+  const readMount = Effect.fn("ArcVcsDriver.readMount")(function* (cwd: string, root: string) {
+    const cached = mounts.get(root);
     if (cached) return cached;
     const result = yield* execute({
-      operation: "ArcVcsDriver.defaultBaseRef",
+      operation: "ArcVcsDriver.readMount",
       cwd,
       args: ["info", "--json", "--mount"],
       maxOutputBytes: 64 * 1024,
     });
     const mount = yield* decodeMount(result.stdout).pipe(
       Effect.mapError((cause) =>
-        invalid(cwd, "defaultBaseRef", "Arc returned invalid mount metadata.", cause),
+        invalid(cwd, "readMount", "Arc returned invalid mount metadata.", cause),
       ),
     );
-    const baseRef = `${mount.repository}/${mount.default_branch}`;
-    defaultBaseRefs.set(root, baseRef);
-    return baseRef;
+    const value = { repository: mount.repository, defaultBranch: mount.default_branch };
+    mounts.set(root, value);
+    return value;
   });
+  // A branch tracking a release branch is compared with it, not with trunk, which it left long ago.
+  const defaultBaseRef = Effect.fn("ArcVcsDriver.defaultBaseRef")(function* (
+    cwd: string,
+    root: string,
+  ) {
+    const [mount, info] = yield* Effect.all([readMount(cwd, root), readInfo(cwd)], {
+      concurrency: 2,
+    });
+    const remote =
+      info.remote && !info.remote.startsWith(ArcChangeOps.USER_BRANCH_PREFIX) ? info.remote : null;
+    return `${mount.repository}/${remote ?? mount.defaultBranch}`;
+  });
+  const mergeBases = yield* Cache.makeWith(
+    (key: string) => {
+      const [cwd, baseRef] = key.split("\0") as [string, string];
+      return execute({
+        operation: "ArcVcsDriver.resolveBase",
+        cwd,
+        args: ["merge-base", "--json", "--leftmost", baseRef, "HEAD"],
+        timeoutMs: MERGE_BASE_TIMEOUT_MS,
+        maxOutputBytes: 64 * 1024,
+      }).pipe(
+        Effect.flatMap((result) => decodeMergeBase(result.stdout)),
+        Effect.map(({ base }) => (COMMIT_ID.test(base) ? base : null)),
+        // A timed-out merge-base stays unresolved for this HEAD instead of rerunning every preview.
+        Effect.catchTags({ VcsProcessTimeoutError: () => Effect.succeed(null) }),
+      );
+    },
+    {
+      capacity: 256,
+      timeToLive: (exit) => (Exit.isSuccess(exit) ? Duration.infinity : Duration.zero),
+    },
+  );
   /** Resolves to null when Arc cannot name a base, so callers can drop the branch range. */
   const resolveBase = Effect.fn("ArcVcsDriver.resolveBase")(
-    function* (cwd: string, explicitBaseRef?: string | null) {
+    function* (
+      cwd: string,
+      explicitBaseRef?: string | null,
+      wait: Duration.Duration = Duration.infinity,
+    ) {
       const root = yield* repositoryRoot(cwd);
       const baseRef = explicitBaseRef || (yield* defaultBaseRef(cwd, root));
       if (baseRef.startsWith("-")) return null;
-      const key = `${root}\0${baseRef}\0${yield* readHead(cwd)}`;
-      if (!mergeBases.has(key)) {
-        const result = yield* execute({
-          operation: "ArcVcsDriver.resolveBase",
-          cwd,
-          args: ["merge-base", "--json", "--leftmost", baseRef, "HEAD"],
-          timeoutMs: MERGE_BASE_TIMEOUT_MS,
-          maxOutputBytes: 64 * 1024,
-        }).pipe(Effect.catchTags({ VcsProcessTimeoutError: () => Effect.succeed(null) }));
-        const mergeBase =
-          result === null
-            ? null
-            : yield* decodeMergeBase(result.stdout).pipe(
-                Effect.map(({ base }) => (COMMIT_ID.test(base) ? base : null)),
-                Effect.orElseSucceed(() => null),
-              );
-        if (mergeBases.size >= 256) mergeBases.clear();
-        mergeBases.set(key, mergeBase);
-      }
-      const mergeBase = mergeBases.get(key);
-      return mergeBase ? { baseRef, mergeBase } : null;
+      // The key carries HEAD so a new commit gets a new merge-base; cwd only runs the command.
+      const key = `${cwd}\0${baseRef}\0${yield* readHead(cwd)}`;
+      const fiber = yield* Cache.get(mergeBases, key).pipe(Effect.forkDetach);
+      const mergeBase = yield* Fiber.join(fiber).pipe(Effect.timeoutOption(wait));
+      return Option.isSome(mergeBase) && mergeBase.value
+        ? { baseRef, mergeBase: mergeBase.value }
+        : null;
     },
     // Other failures, such as an unreachable Arc server, are not cached and retry next time.
     (effect) => effect.pipe(Effect.orElseSucceed(() => null)),
@@ -507,7 +531,7 @@ export const make = Effect.gen(function* () {
       (filePath) =>
         stats.get(filePath) ?? { path: filePath, previousPath: null, additions: 0, deletions: 0 },
     );
-    return { diff, files, truncated, branch: changed?.branch ?? null };
+    return { diff, files, truncated, branch: changed?.branch ?? null, changed };
   });
 
   const counterCommand =
@@ -644,28 +668,26 @@ export const make = Effect.gen(function* () {
           ],
         };
       }
-      const [changed, base] = yield* Effect.all(
+      const [uncommitted, base] = yield* Effect.all(
         [
-          changedFiles(input.cwd),
-          kind === "working-tree" ? Effect.succeed(null) : resolveBase(input.cwd, input.baseRef),
+          kind === "branch-range"
+            ? Effect.succeed(null)
+            : !input.file && !input.ignoreWhitespace
+              ? readWorkingCopy(input.cwd)
+              : readDiff(input.cwd, input.file, input.ignoreWhitespace),
+          kind === "working-tree"
+            ? Effect.succeed(null)
+            : resolveBase(input.cwd, input.baseRef, MERGE_BASE_PREVIEW_WAIT),
         ],
         { concurrency: 2 },
       );
       // Like Git, the branch range runs from the merge-base to the working copy, not to HEAD.
-      const [uncommitted, branch] = yield* Effect.all(
-        [
-          kind === "branch-range"
-            ? Effect.succeed(null)
-            : readDiff(input.cwd, input.file, input.ignoreWhitespace, { from: "HEAD", changed }),
-          base
-            ? readDiff(input.cwd, input.file, input.ignoreWhitespace, {
-                from: base.mergeBase,
-                changed,
-              })
-            : Effect.succeed(null),
-        ],
-        { concurrency: 2 },
-      );
+      const branch = base
+        ? yield* readDiff(input.cwd, input.file, input.ignoreWhitespace, {
+            from: base.mergeBase,
+            changed: uncommitted?.changed ?? (yield* changedFiles(input.cwd)),
+          })
+        : null;
       const sources: ReviewDiffPreviewSource[] = [];
       if (uncommitted)
         sources.push({
@@ -685,7 +707,7 @@ export const make = Effect.gen(function* () {
           kind: "branch-range",
           title: `Changes vs ${base.baseRef}`,
           baseRef: base.baseRef,
-          headRef: changed.branch ?? "HEAD",
+          headRef: branch.branch ?? "HEAD",
           diff: branch.diff,
           files: branch.files,
           diffHash: yield* hashDiff(input.cwd, branch.diff, branch.files),
