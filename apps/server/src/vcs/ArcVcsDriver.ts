@@ -14,6 +14,7 @@ import { VcsRepositoryDetectionError, VcsUnsupportedOperationError } from "@t3to
 import type { ReviewDiffFileStat, ReviewDiffPreviewSource, VcsError } from "@t3tools/contracts";
 import { quoteGitPatchPath, unquoteGitPatchPath } from "@t3tools/shared/gitPatchPath";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as ArcChangeOps from "./ArcChangeOps.ts";
 import * as VcsDriver from "./VcsDriver.ts";
 import * as VcsProcess from "./VcsProcess.ts";
 
@@ -91,7 +92,7 @@ export const make = Effect.gen(function* () {
       new VcsUnsupportedOperationError({
         kind: "arc",
         operation: `ArcVcsDriver.${operation}`,
-        detail: "Arc currently supports reading the existing working copy only.",
+        detail: "Arc does not support this operation.",
       }),
     );
   const freshness = () =>
@@ -576,7 +577,8 @@ export const make = Effect.gen(function* () {
       return {
         isRepo: true,
         supportsMutations: false,
-        hasPrimaryRemote: false,
+        supportsStackedActions: true,
+        hasPrimaryRemote: true,
         isDefaultRef: result.branch === "trunk",
         refName: result.branch,
         hasWorkingTreeChanges: files.length > 0,
@@ -606,7 +608,8 @@ export const make = Effect.gen(function* () {
       return {
         isRepo: true,
         supportsMutations: false,
-        hasPrimaryRemote: false,
+        supportsStackedActions: true,
+        hasPrimaryRemote: true,
         refs,
         totalCount: refs.length,
         nextCursor: null,
@@ -864,5 +867,6 @@ export const make = Effect.gen(function* () {
     listRemotes: () => freshness().pipe(Effect.map((freshness) => ({ remotes: [], freshness }))),
     initRepository: () => unsupported("initRepository"),
     checkpoints,
+    changes: ArcChangeOps.make({ execute, readDiff, safeRelative }),
   } satisfies VcsDriver.VcsDriver["Service"];
 });
