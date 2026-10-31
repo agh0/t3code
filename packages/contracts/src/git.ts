@@ -215,6 +215,8 @@ const VcsStatusChangeRequest = Schema.Struct({
 
 const VcsStatusLocalShape = {
   supportsMutations: Schema.optional(Schema.Boolean),
+  /** Commit, push and change requests. Absent means the same as supportsMutations. */
+  supportsStackedActions: Schema.optional(Schema.Boolean),
   isRepo: Schema.Boolean,
   sourceControlProvider: Schema.optional(SourceControlProviderInfo),
   hasPrimaryRemote: Schema.Boolean,
@@ -280,6 +282,7 @@ export type VcsStatusStreamEvent = typeof VcsStatusStreamEvent.Type;
 
 export const VcsListRefsResult = Schema.Struct({
   supportsMutations: Schema.optional(Schema.Boolean),
+  supportsStackedActions: Schema.optional(Schema.Boolean),
   isAtRepositoryRoot: Schema.optional(Schema.Boolean),
   refs: Schema.Array(VcsRef),
   isRepo: Schema.Boolean,

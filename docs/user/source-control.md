@@ -329,6 +329,10 @@ even when its changes look independent. Stack actions require an environment tha
 
 ## Arc projects
 
-Open an existing Arc working copy, or a project folder inside it. The Arc CLI must be available on the server's PATH. T3 Code detects the repository and shows the current branch, changed files, and uncommitted diffs, including new files. Changes are scoped to the project folder.
+Open an existing Arc working copy, or a project folder inside it. The Arc CLI must be available on the server's PATH. T3 Code detects the repository and shows the current branch, changed files, and diffs, including new files. Changes are scoped to the project folder.
 
-Use the terminal for commits, branch changes, push, and Arcanum reviews. Arc checkpoints, turn rollback, and separate working copies are not supported yet.
+The review panel shows uncommitted changes, the branch's changes since it left its base, and single commits. A branch that tracks a shared branch such as `releases/browser/master` is compared with it; otherwise the base is the repository's default branch. On a large working copy the branch comparison can appear a moment after the uncommitted changes.
+
+Commit, push, and create PR work from the same Git actions menu and open the review on Arcanum. Pushing publishes the branch under `users/<login>/`, and a new PR targets the shared branch the local branch tracks, or the default branch. Switching or creating branches from the branch picker, pull, Arc checkpoints, turn rollback, and separate working copies are not supported yet; use the terminal for those.
+
+Status refreshes are cheap on `arc mount` working copies. On a regular (nativefs) working copy, enable Arc's file monitor with `arc monitor setup --auto` so status stays fast.

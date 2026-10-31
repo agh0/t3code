@@ -42,6 +42,7 @@ import {
   type ThreadPullRequestKey,
   type VcsCreateWorktreeInput,
   type VcsCreateWorktreeResult,
+  type VcsError,
 } from "@t3tools/contracts";
 import {
   hasProjectSettingsOverrides,
@@ -85,6 +86,7 @@ import { detachStackFrame } from "./detachStackFrame.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import type { GitManagerServiceError } from "@t3tools/contracts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import type * as VcsDriver from "../vcs/VcsDriver.ts";
 import * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
@@ -149,6 +151,12 @@ export class GitManager extends Context.Service<
     ) => Effect.Effect<GitPreparePullRequestThreadResult, GitManagerServiceError>;
     readonly runStackedAction: (
       input: GitRunStackedActionInput,
+      options?: GitRunStackedActionOptions,
+    ) => Effect.Effect<GitRunStackedActionResult, GitManagerServiceError>;
+    /** Runs a stacked action through a non-Git driver's change operations. */
+    readonly runChangeStackedAction: (
+      input: GitRunStackedActionInput,
+      changes: VcsDriver.VcsChangeOps,
       options?: GitRunStackedActionOptions,
     ) => Effect.Effect<GitRunStackedActionResult, GitManagerServiceError>;
     readonly subscribePullRequestStateChanges: Effect.Effect<
@@ -806,6 +814,7 @@ export const make = Effect.gen(function* () {
   const resolveStylePolicy = Effect.fn("GitManager.resolveStylePolicy")(function* (
     cwd: string,
     settings: SourceControlTextGenerationSettings,
+    readSubjects: (cwd: string) => Effect.Effect<ReadonlyArray<string>> = readRecentCommitSubjects,
   ) {
     switch (settings.style.mode) {
       case "conventional_commits":
@@ -820,7 +829,7 @@ export const make = Effect.gen(function* () {
             : {},
         );
       case "repo_conventions": {
-        const subjects = yield* readRecentCommitSubjects(cwd);
+        const subjects = yield* readSubjects(cwd);
         const agentInstructions = yield* readRepositoryInstructions(cwd, "AGENTS.md");
         const isClaudeWriter =
           settings.modelSelection.instanceId === "claudeAgent" ||
@@ -2059,6 +2068,16 @@ export const make = Effect.gen(function* () {
       );
   });
 
+  const changeFailure = (operation: string, cwd: string) => (cause: VcsError) =>
+    new GitManagerError({
+      operation: `GitManager.${operation}`,
+      cwd,
+      detail: "detail" in cause ? cause.detail : cause.message,
+      cause,
+    });
+  const recentChangeSubjects = (changes: VcsDriver.VcsChangeOps) => (cwd: string) =>
+    changes.recentCommitSubjects(cwd).pipe(Effect.orElseSucceed(() => []));
+
   const resolveCommitAndBranchSuggestion = Effect.fn("resolveCommitAndBranchSuggestion")(
     function* (input: {
       cwd: string;
@@ -2067,11 +2086,16 @@ export const make = Effect.gen(function* () {
       includeBranch?: boolean;
       filePaths?: readonly string[];
       settings: SourceControlTextGenerationSettings;
+      changes?: VcsDriver.VcsChangeOps;
     }) {
       const customCommit = parseCustomCommitMessage(input.commitMessage ?? "");
-      const context = yield* gitCore.prepareCommitContext(input.cwd, input.filePaths, {
-        includePatch: customCommit === null,
-      });
+      const context = input.changes
+        ? yield* input.changes
+            .prepareCommitContext(input.cwd, input.filePaths)
+            .pipe(Effect.mapError(changeFailure("prepareCommitContext", input.cwd)))
+        : yield* gitCore.prepareCommitContext(input.cwd, input.filePaths, {
+            includePatch: customCommit === null,
+          });
       if (!context) {
         return null;
       }
@@ -2087,7 +2111,11 @@ export const make = Effect.gen(function* () {
         };
       }
 
-      const policy = yield* resolveStylePolicy(input.cwd, input.settings);
+      const policy = yield* resolveStylePolicy(
+        input.cwd,
+        input.settings,
+        input.changes ? recentChangeSubjects(input.changes) : undefined,
+      );
 
       const generated = yield* textGeneration
         .generateCommitMessage({
@@ -2984,6 +3012,39 @@ export const make = Effect.gen(function* () {
     }).pipe(Effect.ensuring(invalidateStatus(input.cwd)));
   }, asUserAction);
 
+  const resolveTextGenerationSettings = Effect.fn("GitManager.resolveTextGenerationSettings")(
+    function* (input: GitRunStackedActionInput) {
+      return yield* projectSettingsFor(input).pipe(
+        Effect.flatMap(({ settings, projectId }) =>
+          settings.sourceControlWriterModelSelection === null
+            ? Effect.succeed({
+                modelSelection: settings.textGenerationModelSelection,
+                style: settings.sourceControlWritingStyle,
+              })
+            : providerRegistry.getProviders.pipe(
+                Effect.map((providers) => ({
+                  modelSelection: ServerSettings.resolveSourceControlWriterModelSelection(
+                    settings,
+                    providers,
+                    projectId,
+                  ),
+                  style: settings.sourceControlWritingStyle,
+                })),
+              ),
+        ),
+        Effect.mapError(
+          (cause) =>
+            new GitManagerError({
+              operation: "runStackedAction",
+              cwd: input.cwd,
+              detail: "Failed to get server settings.",
+              cause,
+            }),
+        ),
+      );
+    },
+  );
+
   const runFeatureBranchStep = Effect.fn("runFeatureBranchStep")(function* (
     settings: SourceControlTextGenerationSettings,
     cwd: string,
@@ -3078,34 +3139,7 @@ export const make = Effect.gen(function* () {
         let commitMessageForStep = input.commitMessage;
         let preResolvedCommitSuggestion: CommitAndBranchSuggestion | undefined = undefined;
 
-        const textGenerationSettings = yield* projectSettingsFor(input).pipe(
-          Effect.flatMap(({ settings, projectId }) =>
-            settings.sourceControlWriterModelSelection === null
-              ? Effect.succeed({
-                  modelSelection: settings.textGenerationModelSelection,
-                  style: settings.sourceControlWritingStyle,
-                })
-              : providerRegistry.getProviders.pipe(
-                  Effect.map((providers) => ({
-                    modelSelection: ServerSettings.resolveSourceControlWriterModelSelection(
-                      settings,
-                      providers,
-                      projectId,
-                    ),
-                    style: settings.sourceControlWritingStyle,
-                  })),
-                ),
-          ),
-          Effect.mapError(
-            (cause) =>
-              new GitManagerError({
-                operation: "runStackedAction",
-                cwd: input.cwd,
-                detail: "Failed to get server settings.",
-                cause,
-              }),
-          ),
-        );
+        const textGenerationSettings = yield* resolveTextGenerationSettings(input);
 
         if (input.featureBranch) {
           yield* Ref.set(currentPhase, Option.some("branch"));
@@ -3223,6 +3257,248 @@ export const make = Effect.gen(function* () {
     asUserAction,
   );
 
+  const runChangeStackedAction: GitManager["Service"]["runChangeStackedAction"] = Effect.fn(
+    "runChangeStackedAction",
+  )(function* (input, changes, options) {
+    const { cwd } = input;
+    const progress = yield* createProgressEmitter(input, options);
+    const currentPhase = yield* Ref.make<Option.Option<GitActionProgressPhase>>(Option.none());
+    const fail = (detail: string) =>
+      new GitManagerError({ operation: "runChangeStackedAction", cwd, detail });
+    const startPhase = (phase: GitActionProgressPhase, label: string) =>
+      Ref.set(currentPhase, Option.some(phase)).pipe(
+        Effect.andThen(progress.emit({ kind: "phase_started", phase, label })),
+      );
+    const terms = sourceControlDefinitions.get(null).changeRequest;
+
+    const runAction = Effect.fn("runChangeStackedAction.runAction")(function* (): Effect.fn.Return<
+      GitRunStackedActionResult,
+      GitManagerServiceError
+    > {
+      const initial = yield* changes
+        .branchState(cwd)
+        .pipe(Effect.mapError(changeFailure("branchState", cwd)));
+      const wantsCommit = isCommitAction(input.action);
+      const wantsPush =
+        input.action === "push" ||
+        input.action === "commit_push" ||
+        input.action === "commit_push_pr" ||
+        (input.action === "create_pr" && (initial.upstream === null || initial.aheadCount > 0));
+      const wantsPr = input.action === "create_pr" || input.action === "commit_push_pr";
+      if (input.featureBranch && !wantsCommit) {
+        return yield* fail("Feature-branch checkout is only supported for commit actions.");
+      }
+      yield* progress.emit({
+        kind: "action_started",
+        phases: [
+          ...(input.featureBranch ? (["branch"] as const) : []),
+          ...(wantsCommit ? (["commit"] as const) : []),
+          ...(wantsPush ? (["push"] as const) : []),
+          ...(wantsPr ? (["pr"] as const) : []),
+        ],
+      });
+      if (!input.featureBranch && (wantsPush || wantsPr) && !initial.branch) {
+        return yield* fail("Cannot push from detached HEAD.");
+      }
+      const settings = yield* resolveTextGenerationSettings(input);
+      const suggestionInput = {
+        cwd,
+        ...(input.commitMessage ? { commitMessage: input.commitMessage } : {}),
+        ...(input.filePaths ? { filePaths: input.filePaths } : {}),
+        settings,
+        changes,
+      };
+
+      let suggestion: CommitAndBranchSuggestion | null = null;
+      let branch: GitRunStackedActionResult["branch"] = { status: "skipped_not_requested" };
+      if (input.featureBranch) {
+        yield* startPhase("branch", "Preparing feature branch...");
+        suggestion = yield* resolveCommitAndBranchSuggestion({
+          ...suggestionInput,
+          branch: initial.branch,
+          includeBranch: true,
+        });
+        if (!suggestion) {
+          return yield* fail(
+            "Cannot create a feature branch because there are no changes to commit.",
+          );
+        }
+        const existing = yield* changes
+          .listBranchNames(cwd)
+          .pipe(Effect.mapError(changeFailure("listBranchNames", cwd)));
+        const name = resolveAutoFeatureBranchName(
+          [...existing],
+          suggestion.branch ?? sanitizeFeatureBranchName(suggestion.subject),
+        );
+        yield* changes
+          .createBranch(cwd, name)
+          .pipe(Effect.mapError(changeFailure("createBranch", cwd)));
+        branch = { status: "created", name };
+      }
+      const currentBranch = branch.name ?? initial.branch;
+
+      let commit: GitRunStackedActionResult["commit"] = { status: "skipped_not_requested" };
+      if (wantsCommit) {
+        yield* Ref.set(currentPhase, Option.some("commit"));
+        if (!suggestion) {
+          if (!input.commitMessage?.trim()) {
+            yield* progress.emit({
+              kind: "phase_started",
+              phase: "commit",
+              label: "Generating commit message...",
+            });
+          }
+          suggestion = yield* resolveCommitAndBranchSuggestion({
+            ...suggestionInput,
+            branch: currentBranch,
+          });
+        }
+        if (suggestion) {
+          yield* startPhase("commit", "Committing...");
+          const { commitSha } = yield* changes
+            .commit(cwd, suggestion.commitMessage, input.filePaths)
+            .pipe(Effect.mapError(changeFailure("commit", cwd)));
+          commit = { status: "created", commitSha, subject: suggestion.subject };
+        } else {
+          commit = { status: "skipped_no_changes" };
+        }
+      }
+
+      let push: GitRunStackedActionResult["push"] = { status: "skipped_not_requested" };
+      if (wantsPush) {
+        yield* startPhase("push", "Pushing...");
+        if (
+          branch.status !== "created" &&
+          commit.status !== "created" &&
+          initial.upstream !== null &&
+          initial.aheadCount === 0
+        ) {
+          push = { status: "skipped_up_to_date", upstreamBranch: initial.upstream };
+        } else {
+          const pushed = yield* changes.push(cwd).pipe(Effect.mapError(changeFailure("push", cwd)));
+          push = {
+            status: "pushed",
+            ...(currentBranch ? { branch: currentBranch } : {}),
+            upstreamBranch: pushed.upstream,
+            setUpstream: pushed.setUpstream,
+          };
+        }
+      }
+
+      let pr: GitRunStackedActionResult["pr"] = { status: "skipped_not_requested" };
+      const upstream = push.upstreamBranch ?? initial.upstream;
+      if (wantsPr) {
+        yield* startPhase("pr", `Preparing ${terms.shortLabel}...`);
+        if (!upstream) {
+          return yield* fail("Current branch has not been pushed. Push before creating a PR.");
+        }
+        const existing = yield* changes
+          .findChangeRequest(cwd, upstream)
+          .pipe(Effect.mapError(changeFailure("findChangeRequest", cwd)));
+        if (existing?.state === "open") {
+          pr = {
+            status: "opened_existing",
+            url: existing.url,
+            number: existing.number,
+            baseBranch: existing.baseRef,
+            headBranch: existing.headRef,
+            title: existing.title,
+          };
+        } else {
+          // A branch started from a release branch targets it; otherwise Arc picks the default.
+          const baseRef = initial.baseRef ?? initial.defaultBranch;
+          yield* progress.emit({
+            kind: "phase_started",
+            phase: "pr",
+            label: `Generating ${terms.shortLabel} content...`,
+          });
+          const range = yield* changes
+            .readRangeContext(cwd, baseRef)
+            .pipe(Effect.mapError(changeFailure("readRangeContext", cwd)));
+          const policy = yield* resolveStylePolicy(cwd, settings, recentChangeSubjects(changes));
+          const threadContext = yield* readThreadContext(input.threadId);
+          const generated = yield* textGeneration.generatePrContent({
+            cwd,
+            baseBranch: baseRef,
+            headBranch: currentBranch ?? upstream,
+            commitSummary: limitContext(range.commitSummary, 20_000),
+            diffSummary: limitContext(range.diffSummary, 20_000),
+            diffPatch: limitContext(range.diffPatch, 60_000),
+            ...(threadContext ? { threadContext } : {}),
+            ...(policy ? { policy } : {}),
+            modelSelection: settings.modelSelection,
+          });
+          yield* progress.emit({
+            kind: "phase_started",
+            phase: "pr",
+            label: `Creating ${terms.singular}...`,
+          });
+          const created = yield* changes
+            .createChangeRequest({
+              cwd,
+              title: generated.title,
+              body: generated.body,
+              baseRef: initial.baseRef,
+            })
+            .pipe(Effect.mapError(changeFailure("createChangeRequest", cwd)));
+          pr = {
+            status: "created",
+            url: created.url,
+            number: created.number,
+            baseBranch: baseRef,
+            headBranch: upstream,
+            title: generated.title,
+          };
+        }
+      }
+
+      const isDefaultBranch = currentBranch === initial.defaultBranch;
+      const openPr =
+        pr.url !== undefined
+          ? pr.url
+          : push.status === "pushed" && upstream && !isDefaultBranch
+            ? yield* changes.findChangeRequest(cwd, upstream).pipe(
+                Effect.map((found) => (found?.state === "open" ? found.url : null)),
+                Effect.orElseSucceed(() => null),
+              )
+            : null;
+      const cta: GitRunStackedActionResult["toast"]["cta"] =
+        input.action === "commit" && commit.status === "created"
+          ? { kind: "run_action", label: "Push", action: { kind: "push" } }
+          : input.action !== "commit" && openPr
+            ? { kind: "open_pr", label: `View ${terms.shortLabel}`, url: openPr }
+            : push.status === "pushed" && !isDefaultBranch
+              ? {
+                  kind: "run_action",
+                  label: `Create ${terms.shortLabel}`,
+                  action: { kind: "create_pr" },
+                }
+              : { kind: "none" };
+      const result = {
+        action: input.action,
+        branch,
+        commit,
+        push,
+        pr,
+        toast: { ...summarizeGitActionResult({ commit, push, pr }, terms), cta },
+      };
+      yield* progress.emit({ kind: "action_finished", result });
+      return result;
+    });
+
+    return yield* runAction().pipe(
+      Effect.tapError((error) =>
+        Effect.flatMap(Ref.get(currentPhase), (phase) =>
+          progress.emit({
+            kind: "action_failed",
+            phase: Option.getOrNull(phase),
+            message: error.message,
+          }),
+        ),
+      ),
+    );
+  });
+
   return GitManager.of({
     createWorktree,
     localStatus,
@@ -3235,6 +3511,7 @@ export const make = Effect.gen(function* () {
     resolvePullRequest,
     preparePullRequestThread,
     runStackedAction,
+    runChangeStackedAction,
     subscribePullRequestStateChanges: PubSub.subscribe(pullRequestStateChanges).pipe(
       Effect.map((subscription) => Stream.fromSubscription(subscription)),
     ),

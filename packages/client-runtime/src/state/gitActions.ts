@@ -49,6 +49,13 @@ export function changeRequestTerminologyFor(
   return sourceControlClients.get(gitStatus?.sourceControlProvider?.kind).changeRequest;
 }
 
+/** Arc commits, pushes and opens change requests while ref and worktree changes stay Git-only. */
+export function canRunStackedActions(
+  status: Pick<VcsStatusResult, "supportsMutations" | "supportsStackedActions"> | null | undefined,
+): boolean {
+  return status?.supportsStackedActions ?? status?.supportsMutations !== false;
+}
+
 export function buildMenuItems(
   gitStatus: VcsStatusResult | null,
   isBusy: boolean,
@@ -215,6 +222,14 @@ export function resolveQuickAction(
   }
 
   if (isBehind) {
+    if (gitStatus.supportsMutations === false) {
+      return {
+        label: "Pull",
+        disabled: true,
+        kind: "show_hint",
+        hint: "Branch is behind upstream. Pull it with your VCS CLI.",
+      };
+    }
     return {
       label: "Pull",
       disabled: false,

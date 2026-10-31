@@ -276,6 +276,14 @@ export function resolveQuickAction(
   }
 
   if (isBehind) {
+    if (gitStatus.supportsMutations === false) {
+      return {
+        label: "Pull",
+        disabled: true,
+        kind: "show_hint",
+        hint: "Branch is behind upstream. Pull it with your VCS CLI.",
+      };
+    }
     return {
       label: "Pull",
       disabled: false,

@@ -3,6 +3,7 @@ import { useAtomMount } from "@effect/atom-react";
 import { EnvironmentProject, EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import {
+  canRunStackedActions,
   createVcsStatusRevalidationAtomFamily,
   type GitActionRequestInput,
   type VcsActionOperation,
@@ -87,8 +88,11 @@ export function useSelectedThreadGitActions() {
   };
   const branchState = useBranches(branchTarget);
   const canWriteSourceControl =
-    hasSourceControlWritePermission && branchState.data?.supportsMutations !== false;
-  const canChangeThreadBranch = canWriteSourceControl && canOperateThread;
+    hasSourceControlWritePermission && canRunStackedActions(branchState.data);
+  const canChangeThreadBranch =
+    canWriteSourceControl && canOperateThread && branchState.data?.supportsMutations !== false;
+  // A commit can still start its own feature branch where ref changes are otherwise Git-only.
+  const canCommitOnFeatureBranch = canWriteSourceControl && canOperateThread;
   const updateThreadGitContext = async (
     thread: NonNullable<typeof selectedThread>,
     nextState: {
@@ -396,6 +400,7 @@ export function useSelectedThreadGitActions() {
   return {
     canWriteSourceControl,
     canChangeThreadBranch,
+    canCommitOnFeatureBranch,
     refreshSelectedThreadGitStatus,
     refreshSelectedThreadBranches,
     onCheckoutSelectedThreadBranch,

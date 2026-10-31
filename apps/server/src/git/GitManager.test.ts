@@ -51,6 +51,8 @@ import {
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
+import * as ArcChangeOps from "../vcs/ArcChangeOps.ts";
+import type * as VcsDriver from "../vcs/VcsDriver.ts";
 import * as VcsProjectConfig from "../vcs/VcsProjectConfig.ts";
 import * as GitWorkflowService from "./GitWorkflowService.ts";
 import type { SourceControlProvider } from "@t3tools/source-control-core/server/SourceControlProvider";
@@ -725,6 +727,84 @@ function makeManager(input?: {
     );
     return { manager, providerCalls };
   });
+}
+
+/** An Arc working copy that answers like the CLI and records every command it was given. */
+function fakeArcChanges(scenario: {
+  readonly branch: string;
+  readonly remote?: string;
+  readonly ahead?: number;
+  readonly prStatus?: Record<string, unknown>;
+  readonly created?: Record<string, unknown>;
+}) {
+  const calls: string[][] = [];
+  let branch = scenario.branch;
+  let remote = scenario.remote;
+  const output = (stdout: string, exitCode = 0, stderr = "") => ({
+    exitCode: ChildProcessSpawner.ExitCode(exitCode),
+    stdout,
+    stderr,
+    stdoutTruncated: false,
+    stderrTruncated: false,
+  });
+  const execute: VcsDriver.VcsDriver["Service"]["execute"] = (input) => {
+    const args = [...input.args];
+    calls.push(args);
+    switch (args[0]) {
+      case "info":
+        return Effect.succeed(
+          output(
+            JSON.stringify(
+              args.includes("--mount")
+                ? { default_branch: "trunk" }
+                : {
+                    branch,
+                    hash: "abc1234def",
+                    user_login: "tester",
+                    ...(remote ? { remote, counts: { ahead: scenario.ahead ?? 0 } } : {}),
+                  },
+            ),
+          ),
+        );
+      case "checkout":
+        branch = args.at(-1)!;
+        remote = undefined;
+        return Effect.succeed(output(""));
+      case "push":
+        if (args[1] === "--set-upstream") remote = args[2];
+        return Effect.succeed(output(""));
+      case "branch":
+        return Effect.succeed(output(JSON.stringify([{ local: true, name: "trunk" }])));
+      case "log":
+        return Effect.succeed(output(JSON.stringify([{ commit: "abc1234def", message: "Fix" }])));
+      case "pr":
+        if (args[1] === "create") return Effect.succeed(output(JSON.stringify(scenario.created)));
+        return Effect.succeed(
+          scenario.prStatus
+            ? output(JSON.stringify(scenario.prStatus))
+            : output("", 1, "[FAIL] Can't find any PR with id\n"),
+        );
+      default:
+        return Effect.succeed(output(""));
+    }
+  };
+  const changes = ArcChangeOps.make({
+    execute,
+    readDiff: () =>
+      Effect.succeed({
+        diff: "diff --git a/a.txt b/a.txt\n",
+        files: [{ path: "a.txt", previousPath: null, additions: 1, deletions: 0 }],
+      }),
+    safeRelative: () => true,
+    bases: new Map(),
+  });
+  const mutations = () =>
+    calls.filter(
+      (args) =>
+        ["add", "commit", "checkout", "push"].includes(args[0]!) ||
+        (args[0] === "pr" && args[1] === "create"),
+    );
+  return { changes, calls, mutations };
 }
 
 const asThreadId = (threadId: string) => threadId as ThreadId;
@@ -5307,6 +5387,156 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           label: "Creating pull request...",
         }),
       ]);
+    }),
+  );
+
+  it.effect("Arc commit stages and commits only the selected paths on the current branch", () =>
+    Effect.gen(function* () {
+      const { manager } = yield* makeManager();
+      const arc = fakeArcChanges({ branch: "topic", remote: "users/tester/topic" });
+      const result = yield* manager.runChangeStackedAction(
+        {
+          actionId: "arc-commit",
+          cwd: "/arcadia/project",
+          action: "commit",
+          commitMessage: "Fix thing",
+          filePaths: ["a.txt"],
+        },
+        arc.changes,
+      );
+      expect(arc.mutations()).toEqual([
+        ["add", "--all", "--", "a.txt"],
+        ["commit", "--no-edit", "--message", "Fix thing", "--", "a.txt"],
+      ]);
+      expect(result.commit).toEqual({
+        status: "created",
+        commitSha: "abc1234def",
+        subject: "Fix thing",
+      });
+      expect(result.toast.cta).toEqual({
+        kind: "run_action",
+        label: "Push",
+        action: { kind: "push" },
+      });
+    }),
+  );
+
+  it.effect("Arc commit and push from trunk publishes a new feature branch", () =>
+    Effect.gen(function* () {
+      const { manager } = yield* makeManager();
+      const arc = fakeArcChanges({ branch: "trunk" });
+      const result = yield* manager.runChangeStackedAction(
+        {
+          actionId: "arc-feature",
+          cwd: "/arcadia/project",
+          action: "commit_push",
+          featureBranch: true,
+        },
+        arc.changes,
+      );
+      const branch = "feature/implement-stacked-git-actions";
+      expect(arc.mutations()).toEqual([
+        ["checkout", "--no-track", "-b", branch],
+        ["add", "--all", "--", "."],
+        ["commit", "--no-edit", "--message", "Implement stacked git actions", "--", "."],
+        ["push", "--set-upstream", `users/tester/${branch}`],
+      ]);
+      expect(result.branch).toEqual({ status: "created", name: branch });
+      expect(result.push).toEqual({
+        status: "pushed",
+        branch,
+        upstreamBranch: `users/tester/${branch}`,
+        setUpstream: true,
+      });
+    }),
+  );
+
+  it.effect("Arc push of a published branch keeps its upstream", () =>
+    Effect.gen(function* () {
+      const { manager } = yield* makeManager();
+      const arc = fakeArcChanges({ branch: "topic", remote: "users/tester/topic", ahead: 2 });
+      const result = yield* manager.runChangeStackedAction(
+        { actionId: "arc-push", cwd: "/arcadia/project", action: "push" },
+        arc.changes,
+      );
+      expect(arc.mutations()).toEqual([["push"]]);
+      expect(result.push).toMatchObject({ status: "pushed", setUpstream: false });
+    }),
+  );
+
+  it.effect("Arc create PR publishes the branch and targets the release branch it tracks", () =>
+    Effect.gen(function* () {
+      const { manager } = yield* makeManager();
+      const arc = fakeArcChanges({
+        branch: "topic",
+        remote: "releases/browser/master",
+        ahead: 1,
+        created: { id: 123 },
+      });
+      const result = yield* manager.runChangeStackedAction(
+        { actionId: "arc-pr", cwd: "/arcadia/project", action: "create_pr" },
+        arc.changes,
+      );
+      expect(arc.mutations()).toEqual([
+        ["push", "--set-upstream", "users/tester/topic"],
+        [
+          "pr",
+          "create",
+          "--push",
+          "--json",
+          "--no-commits",
+          "--no-edit",
+          "--message",
+          "Add stacked git actions\n\n## Summary\n- Add stacked git workflow\n\n## Testing\n- Not run",
+          "--to",
+          "releases/browser/master",
+        ],
+      ]);
+      expect(arc.calls).toContainEqual(["pr", "status", "--json", "users/tester/topic"]);
+      expect(result.pr).toEqual({
+        status: "created",
+        url: "https://a.yandex-team.ru/review/123",
+        number: 123,
+        baseBranch: "releases/browser/master",
+        headBranch: "users/tester/topic",
+        title: "Add stacked git actions",
+      });
+      expect(result.toast.cta).toEqual({
+        kind: "open_pr",
+        label: "View PR",
+        url: "https://a.yandex-team.ru/review/123",
+      });
+    }),
+  );
+
+  it.effect("Arc create PR opens the branch's existing pull request", () =>
+    Effect.gen(function* () {
+      const { manager } = yield* makeManager();
+      const arc = fakeArcChanges({
+        branch: "topic",
+        remote: "users/tester/topic",
+        prStatus: {
+          id: 77,
+          url: "https://a.yandex-team.ru/review/77",
+          summary: "Existing work",
+          status: "open",
+          from_branch: "users/tester/topic",
+          to_branch: "trunk",
+        },
+      });
+      const result = yield* manager.runChangeStackedAction(
+        { actionId: "arc-existing", cwd: "/arcadia/project", action: "create_pr" },
+        arc.changes,
+      );
+      expect(arc.mutations()).toEqual([]);
+      expect(result.pr).toEqual({
+        status: "opened_existing",
+        url: "https://a.yandex-team.ru/review/77",
+        number: 77,
+        baseBranch: "trunk",
+        headBranch: "users/tester/topic",
+        title: "Existing work",
+      });
     }),
   );
 });

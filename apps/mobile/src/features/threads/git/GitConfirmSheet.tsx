@@ -34,7 +34,7 @@ export function GitConfirmSheet(props: GitConfirmSheetProps) {
   const { height: windowHeight } = useWindowDimensions();
   const gitState = useSelectedThreadGitState();
   const gitActions = useSelectedThreadGitActions();
-  const { canWriteSourceControl, canChangeThreadBranch } = gitActions;
+  const { canWriteSourceControl, canChangeThreadBranch, canCommitOnFeatureBranch } = gitActions;
   const { selectedThreadProject } = useThreadSelection();
   const terminology = sourceControlClients.get(
     selectedThreadProject?.repositoryIdentity?.provider,
@@ -77,7 +77,8 @@ export function GitConfirmSheet(props: GitConfirmSheetProps) {
   };
 
   const movePendingActionToFeatureBranch = useCallback(async () => {
-    if (!canChangeThreadBranch || !confirmAction) return;
+    if (!confirmAction || !(includesCommit ? canCommitOnFeatureBranch : canChangeThreadBranch))
+      return;
     navigation.dispatch(StackActions.replace("Thread", { environmentId, threadId }));
 
     if (includesCommit) {
@@ -104,6 +105,7 @@ export function GitConfirmSheet(props: GitConfirmSheetProps) {
     await gitActions.onRunSelectedThreadGitAction({ action: confirmAction });
   }, [
     canChangeThreadBranch,
+    canCommitOnFeatureBranch,
     confirmAction,
     gitActions,
     gitState.selectedThreadBranches,
@@ -181,7 +183,7 @@ export function GitConfirmSheet(props: GitConfirmSheetProps) {
             <SheetActionButton
               icon="arrow.branch"
               label="Feature branch & continue"
-              disabled={!canChangeThreadBranch}
+              disabled={includesCommit ? !canCommitOnFeatureBranch : !canChangeThreadBranch}
               tone="primary"
               onPress={() => void movePendingActionToFeatureBranch()}
             />

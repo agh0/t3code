@@ -428,7 +428,21 @@ export const make = Effect.gen(function* () {
     remoteStatus: Effect.fn("GitWorkflowService.remoteStatus")(function (input, options) {
       return detectGitRepositoryForStatus("GitWorkflowService.remoteStatus", input.cwd).pipe(
         Effect.flatMap((handle) =>
-          handle?.kind === "git" ? gitManager.remoteStatus(input, options) : Effect.succeed(null),
+          handle?.kind === "git"
+            ? gitManager.remoteStatus(input, options)
+            : handle?.driver.changes
+              ? handle.driver.changes
+                  .remoteStatus(input.cwd)
+                  .pipe(
+                    Effect.mapError(
+                      workingTreeFailure(
+                        "GitWorkflowService.remoteStatus",
+                        input.cwd,
+                        "Failed to read working copy remote status.",
+                      ),
+                    ),
+                  )
+              : Effect.succeed(null),
         ),
       );
     }),
@@ -446,14 +460,32 @@ export const make = Effect.gen(function* () {
         Effect.andThen(git.pullCurrentBranch(cwd)),
       );
     }),
-    runStackedAction: Effect.fn("GitWorkflowService.runStackedAction")(function (input, options) {
-      return ensureGit("GitWorkflowService.runStackedAction", input.cwd).pipe(
-        Effect.flatMap((handle) =>
-          withCheckoutLease(
-            handle.repository.rootPath,
-            gitManager.runStackedAction(input, options),
-          ),
+    runStackedAction: Effect.fn("GitWorkflowService.runStackedAction")(function* (input, options) {
+      const operation = "GitWorkflowService.runStackedAction";
+      const handle = yield* registry.resolve({ cwd: input.cwd }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new GitManagerError({
+              operation,
+              cwd: input.cwd,
+              detail: "Failed to resolve the VCS driver for this Git workflow.",
+              cause,
+            }),
         ),
+      );
+      const changes = handle.driver.changes;
+      if (changes) {
+        return yield* withCheckoutLease(
+          handle.repository.rootPath,
+          gitManager
+            .runChangeStackedAction(input, changes, options)
+            .pipe(Effect.ensuring(invalidateWorkingTreeStatus(input.cwd))),
+        );
+      }
+      const gitHandle = yield* requireGitHandle(operation, input.cwd, handle);
+      return yield* withCheckoutLease(
+        gitHandle.repository.rootPath,
+        gitManager.runStackedAction(input, options),
       );
     }),
     resolvePullRequest: routeGitManager(
