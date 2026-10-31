@@ -2,6 +2,8 @@ import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 
 import type {
+  ReviewBranchCommitsInput,
+  ReviewBranchCommitsResult,
   ReviewDiffFileContentsInput,
   ReviewDiffFileContentsResult,
   ReviewDiffPreviewInput,
@@ -29,6 +31,9 @@ export interface VcsWorkingTreeOps {
   readonly getDiffFileContents: (
     input: ReviewDiffFileContentsInput,
   ) => Effect.Effect<ReviewDiffFileContentsResult, VcsError>;
+  readonly getBranchCommits: (
+    input: ReviewBranchCommitsInput,
+  ) => Effect.Effect<ReviewBranchCommitsResult, VcsError>;
 }
 
 export interface VcsCaptureCheckpointInput {

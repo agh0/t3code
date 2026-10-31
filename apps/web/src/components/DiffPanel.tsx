@@ -317,19 +317,56 @@ export default function DiffPanel({
   }, [diffSelection, orderedTurnDiffSummaries, routeThreadRef]);
 
   const selectedRunId = diffSelection.kind === "turn" ? diffSelection.turnId : null;
-  // Read-only working copies (Arc) only report uncommitted changes, not a branch range.
-  const workingTreeOnly = gitStatusQuery.data?.supportsMutations === false;
+  const selectedCommitSha = diffSelection.kind === "commit" ? diffSelection.sha : null;
+  const selectedBaseRef =
+    diffSelection.kind === "branch" || diffSelection.kind === "commit"
+      ? diffSelection.baseRef
+      : null;
+  const branchDiffPreviewInput =
+    canReadFiles && isGitSelection && activeThread && activeCwd
+      ? {
+          cwd: activeCwd,
+          ...(selectedBaseRef ? { baseRef: selectedBaseRef } : {}),
+          ...(selectedCommitSha !== null ? { commitSha: selectedCommitSha } : {}),
+          ignoreWhitespace: diffIgnoreWhitespace,
+          metadataOnly: true,
+          ...(selectedCommitSha === null
+            ? {
+                // From the selection, not selectedGitScope: that scope is derived from this response.
+                sourceKind:
+                  diffSelection.kind === "unstaged"
+                    ? ("working-tree" as const)
+                    : ("branch-range" as const),
+              }
+            : {}),
+        }
+      : undefined;
+  const canRefreshGitDiff =
+    isGitRepo && isGitSelection && activeThread != null && activeCwd != null;
+  // Read under the workspace mutation id, so each mutation refetches the diff; the panel stays
+  // mounted while hidden, so a mutation made then is already reflected when it shows.
+  const branchDiffPreview = useEnvironmentQuery(
+    branchDiffPreviewInput && activeThread
+      ? revisionedQuery(
+          reviewEnvironment.diffPreview({
+            environmentId: activeThread.environmentId,
+            input: branchDiffPreviewInput,
+          }),
+          canRefreshGitDiff ? workspaceMutationId : undefined,
+        )
+      : null,
+  );
+  const previewSources = branchDiffPreview.data?.sources;
+  // Arc without a resolvable trunk base, or an older server, only reports uncommitted changes.
+  const workingTreeOnly =
+    previewSources?.some((source) => source.kind === "working-tree") === true &&
+    !previewSources.some((source) => source.kind === "branch-range");
   const selectedGitScope =
     diffSelection.kind === "unstaged" || diffSelection.kind === "commit"
       ? diffSelection.kind
       : workingTreeOnly
         ? "unstaged"
         : "branch";
-  const selectedCommitSha = diffSelection.kind === "commit" ? diffSelection.sha : null;
-  const selectedBaseRef =
-    diffSelection.kind === "branch" || diffSelection.kind === "commit"
-      ? diffSelection.baseRef
-      : null;
   const selectedFilePath = diffSelection.kind === "turn" ? diffSelection.filePath : null;
   const selectedFileRevealRequestId =
     diffSelection.kind === "turn" ? diffSelection.revealRequestId : 0;
@@ -368,39 +405,6 @@ export default function DiffPanel({
       cacheScope: selectedTurn ? `turn:${selectedTurn.runId}` : null,
     },
     { enabled: isGitRepo && selectedTurn !== undefined },
-  );
-  const branchDiffPreviewInput =
-    canReadFiles && isGitSelection && activeThread && activeCwd
-      ? {
-          cwd: activeCwd,
-          ...(selectedBaseRef ? { baseRef: selectedBaseRef } : {}),
-          ...(selectedCommitSha !== null ? { commitSha: selectedCommitSha } : {}),
-          ignoreWhitespace: diffIgnoreWhitespace,
-          metadataOnly: true,
-          ...(selectedCommitSha === null
-            ? {
-                sourceKind:
-                  selectedGitScope === "unstaged"
-                    ? ("working-tree" as const)
-                    : ("branch-range" as const),
-              }
-            : {}),
-        }
-      : undefined;
-  const canRefreshGitDiff =
-    isGitRepo && isGitSelection && activeThread != null && activeCwd != null;
-  // Read under the workspace mutation id, so each mutation refetches the diff; the panel stays
-  // mounted while hidden, so a mutation made then is already reflected when it shows.
-  const branchDiffPreview = useEnvironmentQuery(
-    branchDiffPreviewInput && activeThread
-      ? revisionedQuery(
-          reviewEnvironment.diffPreview({
-            environmentId: activeThread.environmentId,
-            input: branchDiffPreviewInput,
-          }),
-          canRefreshGitDiff ? workspaceMutationId : undefined,
-        )
-      : null,
   );
   const branchCommitsQuery = useEnvironmentQuery(
     visible && isGitRepo && canReadFiles && activeThread && activeCwd

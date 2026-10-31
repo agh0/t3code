@@ -6,7 +6,13 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import { ChildProcessSpawner } from "effect/process";
 import * as TestClock from "effect/testing/TestClock";
-import { CheckpointRef, type VcsError, VcsProcessSpawnError } from "@t3tools/contracts";
+import {
+  CheckpointRef,
+  VcsProcessExitError,
+  VcsProcessSpawnError,
+  VcsProcessTimeoutError,
+  type VcsError,
+} from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ArcVcsDriver from "./ArcVcsDriver.ts";
 import * as VcsProcess from "./VcsProcess.ts";
@@ -18,6 +24,13 @@ const output = (stdout: string): VcsProcess.VcsProcessOutput => ({
   stdoutTruncated: false,
   stderrTruncated: false,
 });
+
+const HEAD = "1".repeat(40);
+const BASE = "b".repeat(40);
+const PARENT = "a".repeat(40);
+const COMMIT = "c".repeat(40);
+const logEntry = (commit: string, message: string) =>
+  JSON.stringify({ commit, parents: [PARENT], date: "2026-10-21T10:56:32+03:00", message });
 
 const fixture = Effect.fn("test.arcFixture")(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -45,9 +58,19 @@ const fixture = Effect.fn("test.arcFixture")(function* () {
     ...output(""),
     exitCode: ChildProcessSpawner.ExitCode(1),
   });
-  const responses = {
+  const responses: {
+    counter: Effect.Effect<VcsProcess.VcsProcessOutput, VcsError>;
+    info: string;
+    diff: VcsProcess.VcsProcessOutput;
+    status: VcsProcess.VcsProcessOutput;
+    files: VcsProcess.VcsProcessOutput;
+    mergeBase: Effect.Effect<VcsProcess.VcsProcessOutput, VcsError>;
+    log: VcsProcess.VcsProcessOutput;
+  } = {
     counter,
     info: JSON.stringify({ branch: "users/test/topic", hash: "head" }),
+    mergeBase: Effect.succeed(output(JSON.stringify({ base: BASE, ahead: 2, behind: 0 }))),
+    log: output(`${logEntry(COMMIT, "Second\n\nBody")}\n${logEntry(PARENT, "First")}\n`),
     diff: output(patch),
     status: output(""),
     files: output("tracked.txt\n../outside\n.arc/config\n"),
@@ -60,7 +83,25 @@ const fixture = Effect.fn("test.arcFixture")(function* () {
       assert.equal(input.command, "arc");
       switch (input.args[0]) {
         case "info":
-          return Effect.succeed(output(responses.info));
+          return Effect.succeed(
+            output(
+              JSON.stringify(
+                input.args.includes("--mount")
+                  ? { repository: "arcadia", default_branch: "trunk" }
+                  : JSON.parse(responses.info),
+              ),
+            ),
+          );
+        case "rev-parse":
+          return Effect.succeed(output(`${HEAD}\n`));
+        case "merge-base":
+          return responses.mergeBase;
+        case "log":
+          return Effect.succeed(
+            input.args.includes("--no-walk")
+              ? output(`[${logEntry(input.args.at(-1)!, "Fix the thing\n\nDetails")}]`)
+              : responses.log,
+          );
         case "root":
           return Effect.succeed(output(`${root}\n`));
         case "status":
@@ -69,11 +110,19 @@ const fixture = Effect.fn("test.arcFixture")(function* () {
             stdout: responses.status.stdout || JSON.stringify(status),
           });
         case "diff":
-          return Effect.succeed(responses.diff);
+          return Effect.succeed(
+            input.args.includes("--name-status")
+              ? output(
+                  JSON.stringify([
+                    { names: [{ path: "tracked.txt" }, { path: "listed.txt" }, { path: "../up" }] },
+                  ]),
+                )
+              : responses.diff,
+          );
         case "ls-files":
           return Effect.succeed(responses.files);
         case "show":
-          return Effect.succeed(output("old\n"));
+          return Effect.succeed(output(`${input.args[1]}\n`));
         default:
           return Effect.die(`Unexpected Arc command: ${input.args[0]}`);
       }
@@ -125,7 +174,7 @@ describe("ArcVcsDriver", () => {
       Effect.gen(function* () {
         const { driver, cwd, calls } = yield* fixture();
         const result = yield* driver.workingTree.getDiffPreview({ cwd });
-        assert.equal(result.sources.length, 1);
+        assert.equal(result.sources[0]!.kind, "working-tree");
         assert.match(result.sources[0]!.diff, /new file mode/);
         assert.match(result.sources[0]!.diff, /\+new\n\+file/);
         assert.equal(result.sources[0]!.files?.length, 3);
@@ -180,7 +229,7 @@ describe("ArcVcsDriver", () => {
         const error = yield* driver.workingTree
           .getDiffPreview({ cwd, commitSha: "abc" })
           .pipe(Effect.flip);
-        assert.equal(error._tag, "VcsUnsupportedOperationError");
+        assert.equal(error._tag, "VcsRepositoryDetectionError");
         assert.equal(
           (yield* driver.checkpoints
             .captureCheckpoint({ cwd, checkpointRef: CheckpointRef.make("unused") })
@@ -201,6 +250,13 @@ describe("ArcVcsDriver", () => {
         };
         const preview = yield* driver.workingTree.getDiffPreview({ cwd });
         assert.equal(preview.sources[0]?.truncated, true);
+        // A truncated range patch takes its complete file list from Arc's name-status.
+        assert.equal(preview.sources[1]?.truncated, true);
+        assert.deepEqual(preview.sources[1]?.files?.map((file) => file.path).sort(), [
+          "listed.txt",
+          "new file.txt",
+          "tracked.txt",
+        ]);
         responses.status = { ...responses.status, stdoutTruncated: true };
         assert.equal(
           (yield* driver.workingTree.localStatus({ cwd }).pipe(Effect.flip))._tag,
@@ -264,6 +320,182 @@ describe("ArcVcsDriver", () => {
       yield* localStatus;
       yield* localStatus;
       assert.equal(runs("status"), 8);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "compares the branch from its trunk merge-base to the working copy and reads both sides",
+    () =>
+      Effect.gen(function* () {
+        const { driver, cwd, calls } = yield* fixture();
+        const preview = yield* driver.workingTree.getDiffPreview({ cwd });
+        assert.deepEqual(
+          preview.sources.map((source) => source.kind),
+          ["working-tree", "branch-range"],
+        );
+        const branch = preview.sources[1]!;
+        assert.equal(branch.title, "Changes vs arcadia/trunk");
+        assert.equal(branch.baseRef, "arcadia/trunk");
+        assert.equal(branch.headRef, "users/test/topic");
+        assert.match(branch.diff, /new file mode/);
+        assert.deepEqual(branch.files?.map((file) => file.path).sort(), [
+          "new file.txt",
+          "tracked.txt",
+        ]);
+        assert.ok(
+          calls.some(
+            (call) =>
+              call.args.join(" ") === `merge-base --json --leftmost arcadia/trunk HEAD` &&
+              call.timeoutMs === 15_000,
+          ),
+        );
+        assert.ok(
+          calls.some(
+            (call) =>
+              call.args[0] === "diff" &&
+              call.args.includes(BASE) &&
+              call.args.includes("--relative=.") &&
+              !call.args.includes("HEAD"),
+          ),
+        );
+        assert.equal(calls.filter((call) => call.args[0] === "status").length, 1);
+
+        const contents = yield* driver.workingTree.getDiffFileContents({
+          cwd,
+          sourceKind: "branch-range",
+          changeType: "change",
+          baseRef: branch.baseRef,
+          headRef: branch.headRef,
+          oldPath: "new file.txt",
+          newPath: "new file.txt",
+        });
+        assert.deepEqual(contents, {
+          oldContents: `${BASE}:browser/client/new file.txt\n`,
+          newContents: "new\nfile\n",
+        });
+        assert.equal(calls.filter((call) => call.args[0] === "merge-base").length, 1);
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("shows a single commit against its first parent without reading the working copy", () =>
+    Effect.gen(function* () {
+      const { driver, cwd, calls } = yield* fixture();
+      const preview = yield* driver.workingTree.getDiffPreview({ cwd, commitSha: COMMIT });
+      const [source] = preview.sources;
+      assert.equal(preview.sources.length, 1);
+      assert.equal(source?.kind, "commit");
+      assert.equal(source?.id, COMMIT);
+      assert.equal(source?.title, "Commit ccccccc");
+      assert.equal(source?.commitSubject, "Fix the thing");
+      assert.equal(source?.baseRef, PARENT);
+      assert.equal(source?.headRef, COMMIT);
+      assert.deepEqual(
+        source?.files?.map((file) => file.path),
+        ["tracked.txt"],
+      );
+      assert.notMatch(source!.diff, /new file mode/);
+      assert.ok(calls.every((call) => call.args[0] !== "status"));
+      const diff = calls.find((call) => call.args[0] === "diff")!;
+      assert.deepEqual(diff.args.slice(-4), [PARENT, COMMIT, "--", "."]);
+
+      const contents = yield* driver.workingTree.getDiffFileContents({
+        cwd,
+        sourceKind: "commit",
+        changeType: "change",
+        baseRef: PARENT,
+        headRef: COMMIT,
+        oldPath: "tracked.txt",
+        newPath: "tracked.txt",
+      });
+      assert.deepEqual(contents, {
+        oldContents: `${PARENT}:browser/client/tracked.txt\n`,
+        newContents: `${COMMIT}:browser/client/tracked.txt\n`,
+      });
+      const stale = yield* driver.workingTree
+        .getDiffFileContents({
+          cwd,
+          sourceKind: "commit",
+          changeType: "change",
+          baseRef: BASE,
+          headRef: COMMIT,
+          oldPath: "tracked.txt",
+          newPath: "tracked.txt",
+        })
+        .pipe(Effect.flip);
+      assert.equal(stale._tag, "VcsRepositoryDetectionError");
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "lists branch commits after the merge-base, keeping complete lines when truncated",
+    () =>
+      Effect.gen(function* () {
+        const { driver, cwd, calls, responses } = yield* fixture();
+        const result = yield* driver.workingTree.getBranchCommits({ cwd });
+        assert.deepEqual(result, {
+          commits: [
+            { sha: COMMIT, subject: "Second", committedAt: "2026-10-21T10:56:32+03:00" },
+            { sha: PARENT, subject: "First", committedAt: "2026-10-21T10:56:32+03:00" },
+          ],
+          truncated: false,
+        });
+        assert.deepEqual(calls.find((call) => call.args[0] === "log")?.args, [
+          "log",
+          "--json-lines",
+          "-n",
+          "101",
+          `${BASE}..HEAD`,
+        ]);
+        responses.log = {
+          ...responses.log,
+          stdout: `${logEntry(COMMIT, "Second")}\n{"commit":"`,
+          stdoutTruncated: true,
+        };
+        const truncated = yield* driver.workingTree.getBranchCommits({ cwd });
+        assert.deepEqual(
+          truncated.commits.map((commit) => commit.sha),
+          [COMMIT],
+        );
+        assert.equal(truncated.truncated, true);
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("omits the branch range and commits when Arc cannot resolve the merge-base", () =>
+    Effect.gen(function* () {
+      const { driver, cwd, calls, responses } = yield* fixture();
+      responses.mergeBase = Effect.fail(
+        new VcsProcessExitError({
+          operation: "ArcVcsDriver.resolveBase",
+          command: "arc",
+          cwd,
+          exitCode: 1,
+          detail: "unknown reference",
+        }),
+      );
+      const preview = yield* driver.workingTree.getDiffPreview({ cwd });
+      assert.deepEqual(
+        preview.sources.map((source) => source.kind),
+        ["working-tree"],
+      );
+      assert.deepEqual(yield* driver.workingTree.getBranchCommits({ cwd }), {
+        commits: [],
+        truncated: false,
+      });
+      // A failed lookup is not cached, so the next request asks Arc again.
+      assert.equal(calls.filter((call) => call.args[0] === "merge-base").length, 2);
+      assert.ok(calls.every((call) => call.args[0] !== "log"));
+      // A timeout is remembered for this HEAD, so a slow merge-base does not stall every refresh.
+      responses.mergeBase = Effect.fail(
+        new VcsProcessTimeoutError({
+          operation: "ArcVcsDriver.resolveBase",
+          command: "arc",
+          cwd,
+          timeoutMs: 15_000,
+        }),
+      );
+      yield* driver.workingTree.getBranchCommits({ cwd });
+      yield* driver.workingTree.getDiffPreview({ cwd });
+      assert.equal(calls.filter((call) => call.args[0] === "merge-base").length, 3);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });
