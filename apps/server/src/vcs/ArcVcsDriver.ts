@@ -1,7 +1,10 @@
 import { createTwoFilesPatch, parsePatch } from "diff";
+import * as Cache from "effect/Cache";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Hex from "effect/encoding/Hex";
 import * as Option from "effect/Option";
@@ -10,12 +13,15 @@ import * as Schema from "effect/Schema";
 import { VcsRepositoryDetectionError, VcsUnsupportedOperationError } from "@t3tools/contracts";
 import type { ReviewDiffFileStat, VcsError } from "@t3tools/contracts";
 import { quoteGitPatchPath, unquoteGitPatchPath } from "@t3tools/shared/gitPatchPath";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as VcsDriver from "./VcsDriver.ts";
 import * as VcsProcess from "./VcsProcess.ts";
 
 const MAX_METADATA_BYTES = 16 * 1024 * 1024;
 const MAX_PATCH_BYTES = 2 * 1024 * 1024;
 const MAX_FILE_BYTES = 1024 * 1024;
+const WORKING_COPY_MAX_AGE = Duration.minutes(1);
+const MOUNT_COUNTER_ATTRIBUTE = "user.arc.get.counter";
 const Entry = Schema.Struct({ path: Schema.String, status: Schema.String, type: Schema.String });
 const Status = Schema.Struct({
   branch_info: Schema.optional(
@@ -33,6 +39,7 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const process = yield* VcsProcess.VcsProcess;
   const crypto = yield* Crypto.Crypto;
+  const platform = yield* HostProcess.Platform;
   const execute: VcsDriver.VcsDriver["Service"]["execute"] = (input) =>
     process.run({ timeoutMs: 120_000, ...input, command: "arc" });
   const invalid = (cwd: string, operation: string, detail: string, cause?: unknown) =>
@@ -304,10 +311,65 @@ export const make = Effect.gen(function* () {
     return { diff, files, truncated, branch: changed.branch };
   });
 
+  const counterCommand =
+    platform === "darwin"
+      ? { command: "/usr/bin/xattr", args: ["-p", MOUNT_COUNTER_ATTRIBUTE] }
+      : platform === "linux"
+        ? { command: "getfattr", args: ["--only-values", "-n", MOUNT_COUNTER_ATTRIBUTE] }
+        : null;
+  // Arc's FUSE mount bumps this counter on every write, so an unchanged counter and `arc info`
+  // prove the working copy is unchanged. nativefs copies have no counter and always rerun status.
+  const readFingerprint = Effect.fn("ArcVcsDriver.readFingerprint")(function* (cwd: string) {
+    if (counterCommand === null) return null;
+    const root = yield* repositoryRoot(cwd);
+    const counter = yield* process
+      .run({
+        operation: "ArcVcsDriver.readFingerprint",
+        cwd,
+        command: counterCommand.command,
+        args: [...counterCommand.args, root],
+        allowNonZeroExit: true,
+        timeoutMs: 5_000,
+        maxOutputBytes: 1024,
+      })
+      .pipe(
+        Effect.map((result) => result.stdout.trim()),
+        Effect.orElseSucceed(() => ""),
+      );
+    if (!/^\d+\0?$/.test(counter)) return null;
+    const info = yield* execute({
+      operation: "ArcVcsDriver.readFingerprint",
+      cwd,
+      args: ["info", "--json"],
+      maxOutputBytes: 64 * 1024,
+    });
+    return info.stdoutTruncated ? null : `${counter}\0${info.stdout}`;
+  });
+  // Status refreshes invalidate GitWorkflowService's cache every time, so only the fingerprint
+  // decides reuse here; the max age bounds anything the counter might miss.
+  const workingCopyKeys = new Map<string, string>();
+  const workingCopyCache = yield* Cache.makeWith(
+    (key: string) => readDiff(key.slice(0, key.indexOf("\0"))),
+    {
+      capacity: 16,
+      timeToLive: (exit) => (Exit.isSuccess(exit) ? WORKING_COPY_MAX_AGE : Duration.zero),
+    },
+  );
+  const readWorkingCopy = Effect.fn("ArcVcsDriver.readWorkingCopy")(function* (cwd: string) {
+    const fingerprint = yield* readFingerprint(cwd);
+    if (fingerprint === null) return yield* readDiff(cwd);
+    const key = `${cwd}\0${fingerprint}`;
+    const previous = workingCopyKeys.get(cwd);
+    if (previous !== undefined && previous !== key)
+      yield* Cache.invalidate(workingCopyCache, previous);
+    workingCopyKeys.set(cwd, key);
+    return yield* Cache.get(workingCopyCache, key);
+  });
+
   const workingTree: VcsDriver.VcsWorkingTreeOps = {
     currentBranch,
     localStatus: Effect.fn("ArcVcsDriver.localStatus")(function* ({ cwd }) {
-      const result = yield* readDiff(cwd);
+      const result = yield* readWorkingCopy(cwd);
       const files = result.files.map((file) => ({
         path: file.path,
         insertions: file.additions,
@@ -355,7 +417,10 @@ export const make = Effect.gen(function* () {
     getDiffPreview: Effect.fn("ArcVcsDriver.getDiffPreview")(function* (input) {
       if (input.commitSha || (input.file && input.file.sourceKind !== "working-tree"))
         return yield* unsupported("getDiffPreview");
-      const result = yield* readDiff(input.cwd, input.file, input.ignoreWhitespace);
+      const result =
+        input.file || input.ignoreWhitespace
+          ? yield* readDiff(input.cwd, input.file, input.ignoreWhitespace)
+          : yield* readWorkingCopy(input.cwd);
       const hash = yield* crypto
         .digest(
           "SHA-256",

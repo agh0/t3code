@@ -1,10 +1,13 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import { ChildProcessSpawner } from "effect/process";
-import { CheckpointRef } from "@t3tools/contracts";
+import * as TestClock from "effect/testing/TestClock";
+import { CheckpointRef, type VcsError, VcsProcessSpawnError } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ArcVcsDriver from "./ArcVcsDriver.ts";
 import * as VcsProcess from "./VcsProcess.ts";
 
@@ -37,7 +40,14 @@ const fixture = Effect.fn("test.arcFixture")(function* () {
   };
   const patch =
     "diff --git a/tracked.txt b/tracked.txt\n--- a/tracked.txt\n+++ b/tracked.txt\n@@ -1 +1 @@\n-old\n+new\n";
+  // nativefs copies have no mount counter.
+  const counter: Effect.Effect<VcsProcess.VcsProcessOutput, VcsError> = Effect.succeed({
+    ...output(""),
+    exitCode: ChildProcessSpawner.ExitCode(1),
+  });
   const responses = {
+    counter,
+    info: JSON.stringify({ branch: "users/test/topic", hash: "head" }),
     diff: output(patch),
     status: output(""),
     files: output("tracked.txt\n../outside\n.arc/config\n"),
@@ -46,10 +56,11 @@ const fixture = Effect.fn("test.arcFixture")(function* () {
   const process = VcsProcess.VcsProcess.of({
     run: (input) => {
       calls.push(input);
+      if (input.command === "/usr/bin/xattr") return responses.counter;
       assert.equal(input.command, "arc");
       switch (input.args[0]) {
         case "info":
-          return Effect.succeed(output(JSON.stringify({ branch: "users/test/topic" })));
+          return Effect.succeed(output(responses.info));
         case "root":
           return Effect.succeed(output(`${root}\n`));
         case "status":
@@ -70,6 +81,7 @@ const fixture = Effect.fn("test.arcFixture")(function* () {
   });
   const driver = yield* ArcVcsDriver.make.pipe(
     Effect.provideService(VcsProcess.VcsProcess, process),
+    Effect.provideService(HostProcess.Platform, "darwin"),
   );
   return { driver, root, cwd, calls, fs, path, status, responses };
 });
@@ -204,5 +216,54 @@ describe("ArcVcsDriver", () => {
         assert.deepEqual(files.paths, ["complete.txt", "new file.txt"]);
         assert.equal(files.truncated, true);
       }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("reruns Arc status only when the mount counter or arc info changes", () =>
+    Effect.gen(function* () {
+      const { driver, root, cwd, calls, responses } = yield* fixture();
+      const runs = (command: string) => calls.filter((call) => call.args[0] === command).length;
+      const localStatus = driver.workingTree.localStatus({ cwd });
+
+      yield* localStatus;
+      yield* localStatus;
+      assert.equal(runs("status"), 2);
+      assert.equal(runs("info"), 0);
+
+      responses.counter = Effect.succeed(output("7\n"));
+      yield* localStatus;
+      yield* localStatus;
+      yield* driver.workingTree.getDiffPreview({ cwd });
+      assert.equal(runs("status"), 3);
+      assert.equal(runs("diff"), 3);
+      assert.deepEqual(calls.find((call) => call.command === "/usr/bin/xattr")?.args, [
+        "-p",
+        "user.arc.get.counter",
+        root,
+      ]);
+
+      responses.counter = Effect.succeed(output("8\n"));
+      yield* localStatus;
+      assert.equal(runs("status"), 4);
+
+      responses.info = JSON.stringify({ branch: "users/test/topic", hash: "next" });
+      yield* localStatus;
+      assert.equal(runs("status"), 5);
+
+      yield* TestClock.adjust(Duration.minutes(1));
+      yield* localStatus;
+      assert.equal(runs("status"), 6);
+
+      responses.counter = Effect.fail(
+        new VcsProcessSpawnError({
+          operation: "test",
+          command: "/usr/bin/xattr",
+          cwd,
+          cause: "missing",
+        }),
+      );
+      yield* localStatus;
+      yield* localStatus;
+      assert.equal(runs("status"), 8);
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 });
