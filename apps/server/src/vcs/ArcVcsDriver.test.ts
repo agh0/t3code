@@ -144,6 +144,7 @@ describe("ArcVcsDriver", () => {
       assert.equal(calls.find((call) => call.args[0] === "status")?.timeoutMs, 120_000);
       assert.equal(status.refName, "users/test/topic");
       assert.equal(status.supportsMutations, false);
+      assert.equal(status.supportsStackedActions, true);
       assert.equal(status.workingTree.rootPath, cwd);
       assert.deepEqual(status.workingTree.files.map((file) => file.path).sort(), [
         "new file.txt",

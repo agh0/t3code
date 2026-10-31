@@ -10,6 +10,7 @@ import {
   type VcsStatusResult,
 } from "@t3tools/contracts";
 import {
+  canRunStackedActions,
   type GitActionRequestInput,
   requiresDefaultBranchConfirmation,
   resolveQuickAction,
@@ -110,7 +111,7 @@ function useThreadGitControlModel(props: ThreadGitMenuProps) {
     useEnvironmentScope(
       environmentId ? EnvironmentId.make(String(environmentId)) : null,
       AuthSourceControlWriteScope,
-    ) && props.gitStatus?.supportsMutations !== false;
+    ) && canRunStackedActions(props.gitStatus);
   const threadId = props.threadId;
   const { gitStatus, gitOperationLabel, onPull, onRunAction } = props;
 

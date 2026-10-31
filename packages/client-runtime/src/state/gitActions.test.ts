@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { sourceControlClients } from "../sourceControlClients.ts";
 import {
   buildMenuItems,
+  canRunStackedActions,
   getGitActionDisabledReason,
   resolveDefaultBranchActionDialogCopy,
   resolveQuickAction,
@@ -92,5 +93,26 @@ describe("git action copy", () => {
         terminology: sourceControlClients.get("gitlab").changeRequest,
       }).continueLabel,
     ).toBe("Commit, push & create MR");
+  });
+});
+
+describe("stacked action capability", () => {
+  it.each([
+    [{}, true],
+    [{ supportsMutations: false }, false],
+    [{ supportsMutations: false, supportsStackedActions: true }, true],
+    [{ supportsStackedActions: false }, false],
+  ])("for %o is %s", (capabilities, expected) => {
+    expect(canRunStackedActions(status(capabilities))).toBe(expected);
+  });
+
+  it("does not offer a pull a read-only working copy cannot run", () => {
+    expect(resolveQuickAction(status({ behindCount: 1 }), false).kind).toBe("run_pull");
+    expect(
+      resolveQuickAction(
+        status({ behindCount: 1, supportsMutations: false, supportsStackedActions: true }),
+        false,
+      ),
+    ).toMatchObject({ kind: "show_hint", disabled: true });
   });
 });

@@ -17,6 +17,7 @@ import type {
   VcsRepositoryIdentity,
   VcsStatusInput,
   VcsStatusLocalResult,
+  VcsStatusRemoteResult,
 } from "@t3tools/contracts";
 import { CheckpointRef } from "@t3tools/contracts";
 import * as VcsProcess from "./VcsProcess.ts";
@@ -34,6 +35,54 @@ export interface VcsWorkingTreeOps {
   readonly getBranchCommits: (
     input: ReviewBranchCommitsInput,
   ) => Effect.Effect<ReviewBranchCommitsResult, VcsError>;
+}
+
+export interface VcsChangeBranchState {
+  readonly branch: string | null;
+  readonly defaultBranch: string;
+  /** Server branch this branch publishes to; null until published. */
+  readonly upstream: string | null;
+  /** Server branch this branch was started from when it is not published yet. */
+  readonly baseRef: string | null;
+  readonly aheadCount: number;
+  readonly behindCount: number;
+}
+
+export type VcsChangeRequest = NonNullable<VcsStatusRemoteResult["pr"]>;
+
+/** Commit, push and change requests for drivers whose workflow GitManager does not own. */
+export interface VcsChangeOps {
+  readonly branchState: (cwd: string) => Effect.Effect<VcsChangeBranchState, VcsError>;
+  readonly remoteStatus: (cwd: string) => Effect.Effect<VcsStatusRemoteResult, VcsError>;
+  readonly prepareCommitContext: (
+    cwd: string,
+    filePaths?: ReadonlyArray<string>,
+  ) => Effect.Effect<{ stagedSummary: string; stagedPatch: string } | null, VcsError>;
+  readonly recentCommitSubjects: (cwd: string) => Effect.Effect<ReadonlyArray<string>, VcsError>;
+  readonly listBranchNames: (cwd: string) => Effect.Effect<ReadonlyArray<string>, VcsError>;
+  readonly createBranch: (cwd: string, name: string) => Effect.Effect<void, VcsError>;
+  readonly commit: (
+    cwd: string,
+    message: string,
+    filePaths?: ReadonlyArray<string>,
+  ) => Effect.Effect<{ readonly commitSha: string }, VcsError>;
+  readonly push: (
+    cwd: string,
+  ) => Effect.Effect<{ readonly upstream: string; readonly setUpstream: boolean }, VcsError>;
+  readonly findChangeRequest: (
+    cwd: string,
+    headRef: string,
+  ) => Effect.Effect<VcsChangeRequest | null, VcsError>;
+  readonly readRangeContext: (
+    cwd: string,
+    baseRef: string,
+  ) => Effect.Effect<{ commitSummary: string; diffSummary: string; diffPatch: string }, VcsError>;
+  readonly createChangeRequest: (input: {
+    readonly cwd: string;
+    readonly title: string;
+    readonly body: string;
+    readonly baseRef: string | null;
+  }) => Effect.Effect<{ readonly number: number; readonly url: string }, VcsError>;
 }
 
 export interface VcsCaptureCheckpointInput {
@@ -98,6 +147,7 @@ export class VcsDriver extends Context.Service<
     ) => Effect.Effect<VcsProcess.VcsProcessOutput, VcsError>;
     readonly checkpoints: VcsCheckpointOps;
     readonly workingTree?: VcsWorkingTreeOps;
+    readonly changes?: VcsChangeOps;
     readonly detectRepository: (
       cwd: string,
     ) => Effect.Effect<VcsRepositoryIdentity | null, VcsError>;

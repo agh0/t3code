@@ -255,7 +255,7 @@ function GitOverviewSheetContent(props: GitOverviewSheetProps) {
             onPress={() => void onPressMenuItem(item)}
           />
         ))}
-        {behindCount > 0 ? (
+        {behindCount > 0 && gitStatus.data?.supportsMutations !== false ? (
           <ListRow
             icon="arrow.down.circle"
             label="Pull latest"
