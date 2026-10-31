@@ -293,6 +293,7 @@ export const make = Effect.gen(function* () {
       return yield* invalid(cwd, "readHead", "Arc returned an invalid HEAD commit.");
     return head;
   });
+  const bases = new Map<string, string>();
   const mounts = new Map<string, { repository: string; defaultBranch: string }>();
   const readMount = Effect.fn("ArcVcsDriver.readMount")(function* (cwd: string, root: string) {
     const cached = mounts.get(root);
@@ -320,9 +321,11 @@ export const make = Effect.gen(function* () {
     const [mount, info] = yield* Effect.all([readMount(cwd, root), readInfo(cwd)], {
       concurrency: 2,
     });
-    const remote =
-      info.remote && !info.remote.startsWith(ArcChangeOps.USER_BRANCH_PREFIX) ? info.remote : null;
-    return `${mount.repository}/${remote ?? mount.defaultBranch}`;
+    const published = info.remote?.startsWith(ArcChangeOps.USER_BRANCH_PREFIX) === true;
+    const base = published
+      ? info.branch && bases.get(ArcChangeOps.baseKey(cwd, info.branch))
+      : info.remote;
+    return `${mount.repository}/${base || mount.defaultBranch}`;
   });
   const mergeBases = yield* Cache.makeWith(
     (key: string) => {
@@ -889,6 +892,6 @@ export const make = Effect.gen(function* () {
     listRemotes: () => freshness().pipe(Effect.map((freshness) => ({ remotes: [], freshness }))),
     initRepository: () => unsupported("initRepository"),
     checkpoints,
-    changes: ArcChangeOps.make({ execute, readDiff, safeRelative }),
+    changes: ArcChangeOps.make({ execute, readDiff, safeRelative, bases }),
   } satisfies VcsDriver.VcsDriver["Service"];
 });

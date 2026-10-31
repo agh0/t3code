@@ -101,12 +101,17 @@ export interface ArcChangeOpsInput {
     VcsError
   >;
   readonly safeRelative: (value: string) => boolean;
+  /** Shared branch each local branch started from, keyed by `baseKey`; pushing retargets tracking. */
+  readonly bases: Map<string, string>;
 }
+
+export const baseKey = (cwd: string, branch: string) => `${cwd}\0${branch}`;
 
 export const make = ({
   execute,
   readDiff,
   safeRelative,
+  bases,
 }: ArcChangeOpsInput): VcsDriver.VcsChangeOps => {
   const invalid = (cwd: string, operation: string, detail: string, cause?: unknown) =>
     new VcsRepositoryDetectionError({
@@ -172,7 +177,7 @@ export const make = ({
   const readLog = (cwd: string, args: ReadonlyArray<string>) =>
     runJson(cwd, "readLog", ["log", "--json", ...args], decodeLog);
 
-  const branchState = Effect.fn("ArcVcsDriver.branchState")(function* (cwd: string) {
+  const readBranchState = Effect.fn("ArcVcsDriver.branchState")(function* (cwd: string) {
     const [info, defaultBranch] = yield* Effect.all(
       [readInfo(cwd, ["--ahead-behind"]), readDefaultBranch(cwd)],
       { concurrency: "unbounded" },
@@ -180,20 +185,38 @@ export const make = ({
     const branch = info.branch || null;
     const remote = info.remote || null;
     const published = remote?.startsWith(USER_BRANCH_PREFIX) === true;
+    if (branch && remote && !published) bases.set(baseKey(cwd, branch), remote);
     // Without any tracked server branch, Arc reports no counts; measure against the default branch.
     const aheadCount =
       remote === null && branch !== null && branch !== defaultBranch
         ? (yield* readLog(cwd, ["-n", String(MAX_AHEAD_COUNT), `${defaultBranch}..HEAD`])).length
         : (info.counts?.ahead ?? 0);
-    return {
+    const state = {
       branch,
       defaultBranch,
       upstream: published ? remote : null,
-      baseRef: published ? null : remote,
+      baseRef: published ? (branch && bases.get(baseKey(cwd, branch))) || null : remote,
       aheadCount,
       // Behind a shared base is not something a push or a change request has to resolve first.
       behindCount: published ? (info.counts?.behind ?? 0) : 0,
     } satisfies VcsDriver.VcsChangeBranchState;
+    return { state, hash: info.hash ?? null };
+  });
+  const branchState = (cwd: string) => readBranchState(cwd).pipe(Effect.map(({ state }) => state));
+  // A published branch is level with its upstream, so offering a PR needs the count against its base.
+  const aheadOfBase = new Map<string, number>();
+  const countAheadOfBase = Effect.fn("ArcVcsDriver.countAheadOfBase")(function* (
+    cwd: string,
+    base: string,
+    hash: string,
+  ) {
+    const key = `${cwd}\0${base}\0${hash}`;
+    const cached = aheadOfBase.get(key);
+    if (cached !== undefined) return cached;
+    const count = (yield* readLog(cwd, ["-n", String(MAX_AHEAD_COUNT), `${base}..HEAD`])).length;
+    if (aheadOfBase.size >= 256) aheadOfBase.clear();
+    aheadOfBase.set(key, count);
+    return count;
   });
 
   const findChangeRequest = Effect.fn("ArcVcsDriver.findChangeRequest")(function* (
@@ -239,6 +262,19 @@ export const make = ({
     } satisfies VcsDriver.VcsChangeRequest;
   });
 
+  // `arc push` and `arc pr create --push` write to the tracked branch, which may be a colleague's.
+  const rejectForeignUpstream = (
+    operation: string,
+    info: { readonly remote?: string | undefined; readonly user_login?: string | undefined },
+  ) =>
+    info.remote?.startsWith(USER_BRANCH_PREFIX) &&
+    !info.remote.startsWith(`${USER_BRANCH_PREFIX}${info.user_login}/`)
+      ? unsupported(
+          operation,
+          `This branch tracks ${info.remote}, which belongs to another user. Push it from the terminal.`,
+        )
+      : Effect.void;
+
   const checkPaths = (cwd: string, operation: string, paths: ReadonlyArray<string>) =>
     paths.every(safeRelative)
       ? Effect.void
@@ -248,7 +284,7 @@ export const make = ({
     branchState,
     findChangeRequest,
     remoteStatus: Effect.fn("ArcVcsDriver.remoteStatus")(function* (cwd) {
-      const state = yield* branchState(cwd);
+      const { state, hash } = yield* readBranchState(cwd);
       const pr =
         state.upstream !== null && state.branch !== state.defaultBranch
           ? yield* findChangeRequest(cwd, state.upstream).pipe(
@@ -259,10 +295,17 @@ export const make = ({
               ),
             )
           : null;
+      // After a restart only the PR still knows which shared branch the work targets.
+      if (pr && state.branch) bases.set(baseKey(cwd, state.branch), pr.baseRef);
+      const aheadOfDefaultCount =
+        state.upstream !== null && pr?.state !== "open" && hash
+          ? yield* countAheadOfBase(cwd, state.baseRef ?? state.defaultBranch, hash)
+          : undefined;
       return {
         hasUpstream: state.upstream !== null,
         aheadCount: state.aheadCount,
         behindCount: state.behindCount,
+        ...(aheadOfDefaultCount === undefined ? {} : { aheadOfDefaultCount }),
         pr,
       };
     }),
@@ -312,16 +355,18 @@ export const make = ({
           "push",
           `Arc does not push to ${defaultBranch}. Commit on a feature branch instead.`,
         );
-      if (info.remote?.startsWith(USER_BRANCH_PREFIX)) {
-        yield* run(cwd, "push", ["push"], { timeoutMs: WRITE_TIMEOUT_MS });
-        return { upstream: info.remote, setUpstream: false };
-      }
       if (!info.user_login)
         return yield* invalid(cwd, "push", "Arc did not report the signed-in user.");
       const userPrefix = `${USER_BRANCH_PREFIX}${info.user_login}/`;
+      if (info.remote?.startsWith(userPrefix)) {
+        yield* run(cwd, "push", ["push"], { timeoutMs: WRITE_TIMEOUT_MS });
+        return { upstream: info.remote, setUpstream: false };
+      }
+      yield* rejectForeignUpstream("push", info);
       const upstream = info.branch.startsWith(userPrefix)
         ? info.branch
         : `${userPrefix}${info.branch}`;
+      if (info.remote) bases.set(baseKey(cwd, info.branch), info.remote);
       yield* run(cwd, "push", ["push", "--set-upstream", upstream], {
         timeoutMs: WRITE_TIMEOUT_MS,
       });
@@ -347,6 +392,9 @@ export const make = ({
       };
     }),
     createChangeRequest: Effect.fn("ArcVcsDriver.createChangeRequest")(function* (input) {
+      const info = yield* readInfo(input.cwd);
+      yield* rejectForeignUpstream("createChangeRequest", info);
+      if (info.branch && input.baseRef) bases.set(baseKey(input.cwd, info.branch), input.baseRef);
       const message = input.body.trim() ? `${input.title}\n\n${input.body.trim()}` : input.title;
       const created = yield* runJson(
         input.cwd,
