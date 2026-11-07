@@ -1,6 +1,6 @@
 import { createTwoFilesPatch, parsePatch } from "diff";
 import * as Cache from "effect/Cache";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -84,7 +84,7 @@ export const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const process = yield* VcsProcess.VcsProcess;
-  const crypto = yield* Crypto.Crypto;
+  const digest = yield* Digest.Digest;
   const platform = yield* HostProcess.Platform;
   const execute: VcsDriver.VcsDriver["Service"]["execute"] = (input) =>
     process.run({ timeoutMs: 120_000, ...input, command: "arc" });
@@ -393,9 +393,9 @@ export const make = Effect.gen(function* () {
     return { sha: entry.commit, parent, subject: subjectOf(entry.message) };
   });
   const hashDiff = (cwd: string, diff: string, files: ReadonlyArray<ReviewDiffFileStat>) =>
-    crypto
+    digest
       .digest(
-        "SHA-256",
+        Digest.sha256,
         new TextEncoder().encode(diff + "\0" + files.map((file) => file.path).join("\0")),
       )
       .pipe(

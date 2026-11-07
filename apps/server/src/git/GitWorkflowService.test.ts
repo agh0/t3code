@@ -145,5 +145,5 @@ it.effect("routes Arc reads and stacked actions without Git and refuses Git muta
         ),
       ),
     );
-  }).pipe(Effect.provide(NodeServices.layer)),
+  }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );

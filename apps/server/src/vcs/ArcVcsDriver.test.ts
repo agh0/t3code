@@ -1,10 +1,12 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import { ChildProcessSpawner } from "effect/process";
 import * as TestClock from "effect/testing/TestClock";
@@ -18,6 +20,8 @@ import {
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ArcVcsDriver from "./ArcVcsDriver.ts";
 import * as VcsProcess from "./VcsProcess.ts";
+
+const TestLayer = Layer.mergeAll(NodeServices.layer, NodeCrypto.layer);
 
 const output = (stdout: string): VcsProcess.VcsProcessOutput => ({
   exitCode: ChildProcessSpawner.ExitCode(0),
@@ -168,7 +172,7 @@ describe("ArcVcsDriver", () => {
       assert.ok(
         calls.every((call) => call.args[0] !== "ls-files" || !call.args.includes("--others")),
       );
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(TestLayer)),
   );
 
   it.effect(
@@ -196,7 +200,7 @@ describe("ArcVcsDriver", () => {
             (call) => !["add", "reset", "stash", "checkout"].includes(call.args[0] ?? ""),
           ),
         );
-      }).pipe(Effect.provide(NodeServices.layer)),
+      }).pipe(Effect.provide(TestLayer)),
   );
 
   it.effect(
@@ -239,7 +243,7 @@ describe("ArcVcsDriver", () => {
             .pipe(Effect.flip))._tag,
           "VcsUnsupportedOperationError",
         );
-      }).pipe(Effect.provide(NodeServices.layer)),
+      }).pipe(Effect.provide(TestLayer)),
   );
   it.effect(
     "bounds incomplete patch and metadata output without treating it as a complete preview",
@@ -274,7 +278,7 @@ describe("ArcVcsDriver", () => {
         const files = yield* driver.listWorkspaceFiles(cwd);
         assert.deepEqual(files.paths, ["complete.txt", "new file.txt"]);
         assert.equal(files.truncated, true);
-      }).pipe(Effect.provide(NodeServices.layer)),
+      }).pipe(Effect.provide(TestLayer)),
   );
 
   it.effect("reruns Arc status only when the mount counter or arc info changes", () =>
@@ -327,7 +331,7 @@ describe("ArcVcsDriver", () => {
       yield* localStatus;
       yield* localStatus;
       assert.equal(runs("status"), 8);
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(TestLayer)),
   );
 
   it.effect(
@@ -381,7 +385,7 @@ describe("ArcVcsDriver", () => {
           newContents: "new\nfile\n",
         });
         assert.equal(calls.filter((call) => call.args[0] === "merge-base").length, 1);
-      }).pipe(Effect.provide(NodeServices.layer)),
+      }).pipe(Effect.provide(TestLayer)),
   );
 
   it.effect("shows a single commit against its first parent without reading the working copy", () =>
@@ -430,7 +434,7 @@ describe("ArcVcsDriver", () => {
         })
         .pipe(Effect.flip);
       assert.equal(stale._tag, "VcsRepositoryDetectionError");
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(TestLayer)),
   );
 
   it.effect(
@@ -464,7 +468,7 @@ describe("ArcVcsDriver", () => {
           [COMMIT],
         );
         assert.equal(truncated.truncated, true);
-      }).pipe(Effect.provide(NodeServices.layer)),
+      }).pipe(Effect.provide(TestLayer)),
   );
 
   it.effect("omits the branch range and commits when Arc cannot resolve the merge-base", () =>
@@ -503,7 +507,7 @@ describe("ArcVcsDriver", () => {
       yield* driver.workingTree.getBranchCommits({ cwd });
       yield* driver.workingTree.getDiffPreview({ cwd });
       assert.equal(calls.filter((call) => call.args[0] === "merge-base").length, 3);
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(TestLayer)),
   );
 
   it.effect("compares with the tracked release branch without holding the preview on it", () =>
@@ -534,6 +538,6 @@ describe("ArcVcsDriver", () => {
         calls.filter((call) => call.args[0] === "merge-base").map((call) => call.args.join(" ")),
         ["merge-base --json --leftmost arcadia/releases/browser/master HEAD"],
       );
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(TestLayer)),
   );
 });
