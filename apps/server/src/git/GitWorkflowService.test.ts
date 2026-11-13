@@ -90,6 +90,7 @@ it.effect("routes Arc reads and stacked actions without Git and refuses Git muta
     });
     yield* Effect.gen(function* () {
       const workflow = yield* GitWorkflowService.GitWorkflowService;
+      assert.equal(yield* workflow.repositoryRoot(cwd), cwd);
       assert.equal((yield* workflow.status({ cwd })).supportsMutations, false);
       assert.equal(yield* workflow.currentBranch(cwd), "users/test/topic");
       assert.equal((yield* workflow.listRefs({ cwd })).refs[0]?.name, "users/test/topic");
