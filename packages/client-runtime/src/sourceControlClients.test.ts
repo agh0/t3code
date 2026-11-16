@@ -59,6 +59,15 @@ describe("sourceControlClients.parseChangeRequestUrl", () => {
     expect(kindOf("https://github.com/acme/web/pull/42")).toBe("github");
   });
 
+  it("reads an Arcanum review, whose path names no repository, as Arcadia's", () => {
+    expect(parse("https://a.yandex-team.ru/review/17050314/details")).toEqual({
+      host: "a.yandex-team.ru",
+      repository: "arcadia",
+      number: 17050314,
+    });
+    expect(kindOf("https://a.yandex-team.ru/review/17050314")).toBe("arcanum");
+  });
+
   it("reads Forgejo URLs even when the hostname contains github", () => {
     expect(parse("https://github.internal/team/repo/pulls/7")).toEqual({
       host: "github.internal",
