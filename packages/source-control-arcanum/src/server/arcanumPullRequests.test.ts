@@ -86,6 +86,15 @@ describe("checks", () => {
       arcanumCheck(check("ci", "build", "unknown", { required: true, satisfied: true })).status,
       "neutral",
     );
+    assert.deepStrictEqual(
+      [
+        check("arcanum", "approved", "pending", { required: true }),
+        check("arcanum", "[approved] for: broinfra:bro", "pending"),
+        check("arcanum", "configs_discovered", "pending", { required: true }),
+        check("ci", "approved", "pending"),
+      ].map((gate) => arcanumCheck(gate).status),
+      ["action-required", "action-required", "pending", "pending"],
+    );
   });
 
   it("rolls up the required checks, or all of them when none is required", () => {
@@ -114,7 +123,7 @@ describe("checks", () => {
       "failing",
     );
     assert.strictEqual(rollup(check("ci", "a", "success"), check("ci", "b", "unknown")), "passing");
-    assert.strictEqual(rollup(check("ci", "a", "action_required")), "failing");
+    assert.strictEqual(rollup(check("ci", "a", "action_required")), "pending");
   });
 
   it("reads approval from Arcanum's own approved gate", () => {

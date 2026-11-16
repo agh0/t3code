@@ -129,15 +129,24 @@ const CHECK_STATUSES: Readonly<Record<string, PullRequestCheckStatus>> = {
   skipped: "skipped",
 };
 
+const isApprovalGate = (check: ArcanumCheck) =>
+  check.system === "arcanum" && (check.type === "approved" || check.type.startsWith("[approved]"));
+
+function checkStatus(check: ArcanumCheck): PullRequestCheckStatus {
+  // A pending approval gate waits on reviewers, not on a run, so it must not hold the thread busy.
+  if (check.status === "pending" && isApprovalGate(check)) return "action-required";
+  const mapped = CHECK_STATUSES[check.status ?? ""];
+  if (mapped !== undefined) return mapped;
+  // `unknown` is a check not run yet: optional ones are often never run, required ones block merging.
+  return check.status === "unknown" && check.required === true && check.satisfied !== true
+    ? "action-required"
+    : "neutral";
+}
+
 export function arcanumCheck(check: ArcanumCheck): PullRequestCheck {
   return {
     name: `${check.system}/${check.type}`,
-    // `unknown` is a check not run yet: optional ones are often never run, required ones block merging.
-    status:
-      CHECK_STATUSES[check.status ?? ""] ??
-      (check.status === "unknown" && check.required === true && check.satisfied !== true
-        ? "action-required"
-        : "neutral"),
+    status: checkStatus(check),
     description: check.description?.trim() || null,
     url: check.system_check_uri?.trim() || null,
     required: check.required === true,
@@ -151,16 +160,10 @@ export function checksState(
   const required = checks.filter((check) => check.required === true);
   const gate = required.length > 0 ? required : checks;
   if (gate.length === 0) return null;
-  if (
-    gate.some(
-      (check) =>
-        check.status === "failure" ||
-        check.status === "cancelled" ||
-        check.status === "action-required",
-    )
-  )
+  if (gate.some((check) => check.status === "failure" || check.status === "cancelled"))
     return "failing";
-  if (gate.some((check) => check.status === "pending")) return "pending";
+  if (gate.some((check) => check.status === "pending" || check.status === "action-required"))
+    return "pending";
   return "passing";
 }
 
